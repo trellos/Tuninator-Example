@@ -78,6 +78,12 @@ function copyWorkletPlugin(): Plugin {
 }
 
 export default defineConfig({
+  // A GitHub Pages project site serves from a subpath (e.g. "/tuninator-example/"),
+  // not the domain root. The deploy workflow sets BASE_PATH from the actual repo
+  // name; local dev and preview fall back to "/". Consumers read this back via
+  // `import.meta.env.BASE_URL`, which Vite derives from `base` -- see
+  // WORKLET_URL in src/main.ts, which would otherwise 404 under a subpath.
+  base: process.env.BASE_PATH || "/",
   plugins: [copyWorkletPlugin()],
   resolve: {
     alias: [{ find: /^tuninator$/, replacement: LIB_ENTRY }],

@@ -25,8 +25,15 @@ import { Ui, type SourceChoice } from "./ui.js";
 
 import "./styles.css";
 
-/** Where vite.config.ts drops the library's built worklet. */
-const WORKLET_URL = "/assets/tuninator-worklet.js";
+/**
+ * Where vite.config.ts drops the library's built worklet.
+ *
+ * Built through `import.meta.env.BASE_URL`, not a bare "/assets/...", because
+ * a GitHub Pages project site serves from a subpath (e.g. "/tuninator-example/").
+ * A hardcoded root-absolute path 404s there even though it works in local dev,
+ * where BASE_URL is just "/".
+ */
+const WORKLET_URL = `${import.meta.env.BASE_URL}assets/tuninator-worklet.js`;
 
 const ERROR_CODES: ReadonlySet<string> = new Set<TuninatorErrorCode>([
   "mic-unavailable",

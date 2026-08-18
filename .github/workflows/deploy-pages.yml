@@ -1,0 +1,95 @@
+name: Deploy to GitHub Pages
+
+# The demo depends on a sibling checkout of the Tuninator library
+# (vite.config.ts resolves `tuninator` to `../Tuninator/src/index.ts`, and the
+# worklet is copied from `../Tuninator/dist/tuninator-worklet.js`), so this
+# workflow checks out both repos side by side before building.
+
+on:
+  push:
+    branches:
+      # TODO: once this branch's work merges, drop it here and update
+      # LIBRARY_REF below to track `main` instead of the dev branch directly.
+      - main
+      - claude/tuninator-orchestration-agent-phcm0m
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deployment in flight; a newer push supersedes an in-progress one
+# rather than queuing behind it.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+  # Branch/tag/commit of trellos/Tuninator to build the library from. The demo
+  # repo's own state doesn't determine which library version it runs against,
+  # so this is pinned explicitly rather than left to default-branch drift.
+  # TODO: switch to "main" once the library work on this branch is merged.
+  LIBRARY_REF: claude/tuninator-orchestration-agent-phcm0m
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tuninator-example
+        uses: actions/checkout@v4
+        with:
+          path: tuninator-example
+
+      - name: Checkout trellos/Tuninator (sibling, for the library build)
+        uses: actions/checkout@v4
+        with:
+          repository: trellos/Tuninator
+          ref: ${{ env.LIBRARY_REF }}
+          # Must land as a sibling directory literally named "Tuninator" --
+          # vite.config.ts resolves the library via `path.resolve(here, "..",
+          # "Tuninator")`, relative to the tuninator-example checkout above.
+          path: Tuninator
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build the library
+        # Produces dist/index.js + .d.ts and the self-contained
+        # dist/tuninator-worklet.js that the demo's vite plugin copies in.
+        run: |
+          npm ci
+          npm run build
+        working-directory: Tuninator
+
+      - name: Install demo dependencies
+        # Resolves the `tuninator: file:../Tuninator` dependency declared in
+        # package.json. Actual imports go through vite.config.ts's alias to
+        # the library's src/, not this resolved copy, but npm still needs a
+        # valid package here to satisfy the file: reference.
+        run: npm ci
+        working-directory: tuninator-example
+
+      - name: Build the demo
+        env:
+          BASE_PATH: /${{ github.event.repository.name }}/
+        run: npm run build
+        working-directory: tuninator-example
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: tuninator-example/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

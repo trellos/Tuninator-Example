@@ -124,6 +124,20 @@
             <dd>
               <div class="meter"><div class="meter-fill level" id="level-fill"></div></div>
             </dd>
+
+            <!--
+              Per-input-channel level, from PitchFrame.channelRms.
+
+              A 2-in interface is a single stereo device to the browser, so an
+              instrument in input 2 arrives only on channel 1. Without this row
+              a dead channel and a dead detector look identical: no pitch, no
+              confidence, a flat level meter, and no error anywhere.
+            -->
+            <dt>channels</dt>
+            <dd>
+              <div class="channel-meters" id="channel-meters"></div>
+              <span class="channel-note" id="channel-note">—</span>
+            </dd>
           </dl>
         </section>
 

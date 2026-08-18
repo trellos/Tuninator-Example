@@ -528,6 +528,63 @@ body {
   background: linear-gradient(90deg, var(--accent), var(--near), var(--accent-warm));
 }
 
+/* ---------- per-input-channel meters ---------- */
+
+.meters dd.stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+}
+
+.channel-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.channel-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.channel-row .channel-label,
+.channel-row .channel-db {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.channel-row .channel-label {
+  min-width: 28px;
+}
+
+.channel-row .channel-db {
+  min-width: 54px;
+  text-align: right;
+}
+
+/* A channel that never leaves the floor is the whole point of this row, so make
+   it unmistakable rather than just a bar that happens to be short. */
+.channel-row[data-silent="yes"] .meter-fill {
+  background: var(--border);
+}
+
+.channel-row[data-silent="yes"] .channel-label,
+.channel-row[data-silent="yes"] .channel-db {
+  color: var(--bad);
+}
+
+.channel-note {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.channel-note[data-warn="yes"] {
+  color: var(--near);
+}
+
 /* ---------- active events ---------- */
 
 .active-events {
@@ -1098,6 +1155,32 @@ body {
 ::selection {
   background: color-mix(in srgb, var(--accent) 35%, transparent);
   color: var(--text);
+}
+
+/* ---------- per-input-channel meters (merged from main) ---------- */
+
+/* The feature arrived written against the old palette but entirely in tokens,
+   so it inherited the new one for free. These are consistency touch-ups only. */
+
+.channel-row .channel-label {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+/* dB readouts update continuously; tabular figures stop them jittering. */
+.channel-row .channel-db {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A silent channel is the entire reason this row exists, so it gets the state
+   layer's glow rather than only a colour change. */
+.channel-row[data-silent="yes"] .channel-label,
+.channel-row[data-silent="yes"] .channel-db {
+  text-shadow: var(--glow-1);
+}
+
+.channel-note {
+  font-family: var(--font-mono);
 }
 
 /* ---------- motion + contrast contracts ---------- */

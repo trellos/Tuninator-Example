@@ -114,6 +114,10 @@ export class Ui {
   #confidenceFill: HTMLElement;
   #confidenceValue: HTMLElement;
   #levelFill: HTMLElement;
+  #channelMeters: HTMLElement;
+  #channelNote: HTMLElement;
+  /** Bars currently in the DOM, rebuilt only when the channel count changes. */
+  #channelBars: HTMLElement[] = [];
 
   #activeEvents: HTMLElement;
   #eventLog: HTMLElement;
@@ -149,6 +153,9 @@ export class Ui {
     this.#confidenceFill = must("confidence-fill");
     this.#confidenceValue = must("confidence-value");
     this.#levelFill = must("level-fill");
+    this.#channelMeters = must("channel-meters");
+    this.#channelNote = must("channel-note");
+    this.#channelMeters.parentElement?.classList.add("stacked");
 
     this.#activeEvents = must("active-events");
     this.#eventLog = must("event-log");
@@ -285,6 +292,91 @@ export class Ui {
     const rms = frame.amplitude.rms;
     const level = rms <= 0 ? 0 : clamp((20 * Math.log10(rms) + 60) / 60, 0, 1);
     this.#levelFill.style.width = `${(level * 100).toFixed(1)}%`;
+
+    this.#renderChannels(frame.channelRms);
+  }
+
+  /**
+   * Per-input-channel level, straight from `PitchFrame.channelRms`.
+   *
+   * The library sums every input channel before analysing, which is the right
+   * default but hides the one thing a user needs when nothing is detected: a
+   * 2-in interface is a single stereo device, an instrument in input 2 is on
+   * channel 1 alone, and a browser that captured only channel 0 produces the
+   * exact same screen as a broken detector. Showing the channels separately
+   * turns that into something you can see in a second.
+   */
+  #renderChannels(channelRms: number[] | undefined): void {
+    if (!channelRms || channelRms.length === 0) {
+      if (this.#channelBars.length > 0) {
+        this.#channelMeters.replaceChildren();
+        this.#channelBars = [];
+      }
+      this.#channelNote.textContent = "—";
+      delete this.#channelNote.dataset["warn"];
+      return;
+    }
+
+    if (this.#channelBars.length !== channelRms.length) {
+      this.#channelMeters.replaceChildren();
+      this.#channelBars = channelRms.map((_, index) => {
+        const row = document.createElement("div");
+        row.className = "channel-row";
+
+        const label = document.createElement("span");
+        label.className = "channel-label";
+        label.textContent = `ch${index}`;
+
+        const meter = document.createElement("div");
+        meter.className = "meter";
+        const fill = document.createElement("div");
+        fill.className = "meter-fill level";
+        meter.append(fill);
+
+        const db = document.createElement("span");
+        db.className = "channel-db";
+        db.textContent = "−∞ dB";
+
+        row.append(label, meter, db);
+        this.#channelMeters.append(row);
+        return row;
+      });
+    }
+
+    let live = 0;
+    for (const [index, rms] of channelRms.entries()) {
+      const row = this.#channelBars[index];
+      if (!row) continue;
+      const fill = row.querySelector<HTMLElement>(".meter-fill");
+      const db = row.querySelector<HTMLElement>(".channel-db");
+      const dbfs = rms <= 0 ? Number.NEGATIVE_INFINITY : 20 * Math.log10(rms);
+      // -60 dBFS is the floor the summed level meter above uses too.
+      const silent = !(dbfs > -60);
+      if (!silent) live += 1;
+      if (fill) fill.style.width = `${(clamp((dbfs + 60) / 60, 0, 1) * 100).toFixed(1)}%`;
+      if (db) db.textContent = silent ? "−∞ dB" : `${dbfs.toFixed(1)} dB`;
+      row.dataset["silent"] = silent ? "yes" : "no";
+    }
+
+    const count = `${channelRms.length} ch`;
+    if (channelRms.length > 1 && live === 0) {
+      this.#channelNote.textContent = `${count} · nothing on any channel`;
+      this.#channelNote.dataset["warn"] = "yes";
+    } else if (channelRms.length > 1 && live < channelRms.length) {
+      this.#channelNote.textContent = `${count} · signal on ${live} of ${channelRms.length}`;
+      this.#channelNote.dataset["warn"] = "yes";
+    } else if (channelRms.length === 1) {
+      // Named rather than warned about: a built-in laptop microphone really is
+      // mono, so an amber banner here would cry wolf for most people. On a 2-in
+      // interface the same words mean the browser captured one channel and
+      // input 2 never reached the page at all -- which is exactly the question
+      // this row exists to answer.
+      this.#channelNote.textContent = "1 ch · mono capture";
+      delete this.#channelNote.dataset["warn"];
+    } else {
+      this.#channelNote.textContent = count;
+      delete this.#channelNote.dataset["warn"];
+    }
   }
 
   #renderActiveEvents(events: MusicEvent[]): void {

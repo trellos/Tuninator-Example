@@ -136,6 +136,8 @@ type Settings = {
   failWith: TuninatorErrorCode | null;
   autostart: boolean;
   metronome: boolean;
+  /** `input.channels`: which input channel(s) the library should analyse. */
+  channels: "auto" | "sum" | number;
 };
 
 function readSettings(): Settings {
@@ -166,7 +168,23 @@ function readSettings(): Settings {
     failWith,
     autostart: truthy(params.get("autostart")),
     metronome: truthy(params.get("metronome")),
+    channels: readChannels(params.get("channels")),
   };
+}
+
+/**
+ * `?channels=auto|sum|<index>`.
+ *
+ * The library default is `auto` (analyse the loudest channel). `sum` is exposed
+ * here because it is the only way to *see* the difference: a mic and a DI of one
+ * guitar, summed, comb-filter into an octave error, and a demo that can only
+ * ever run the good path cannot demonstrate that.
+ */
+function readChannels(value: string | null): "auto" | "sum" | number {
+  if (value === null || value === "auto") return "auto";
+  if (value === "sum") return "sum";
+  const index = Number.parseInt(value, 10);
+  return Number.isInteger(index) && index >= 0 ? index : "auto";
 }
 
 /* -------------------------------------------------------------------------- */
@@ -181,6 +199,10 @@ type DemoProbe = {
   source: "mock" | "live";
   state: TuninatorState;
   lastError: TuninatorError | null;
+  /** Last `PitchFrame.selectedChannel`: index, null for summed, undefined for none. */
+  selectedChannel: number | null | undefined;
+  /** Last `PitchFrame.channelRms`. */
+  channelRms: number[] | undefined;
 };
 
 class App {
@@ -226,6 +248,8 @@ class App {
       source: "mock",
       state: "idle",
       lastError: null,
+      selectedChannel: undefined,
+      channelRms: undefined,
     };
 
     this.#timeline.setGrid(this.#metronome.getGrid());
@@ -257,6 +281,7 @@ class App {
     return {
       mode: this.#settings.mode,
       workletUrl: this.#settings.workletUrl,
+      input: { channels: this.#settings.channels },
       analysis: { minFrequencyHz: 70, maxFrequencyHz: 1400 },
     };
   }
@@ -341,6 +366,8 @@ class App {
       tuninator.on("pitchFrame", (frame: PitchFrame) => {
         this.#timebase.observe(frame.timestamp);
         this.#probe.frames += 1;
+        this.#probe.selectedChannel = frame.selectedChannel;
+        this.#probe.channelRms = frame.channelRms;
         this.#ui.setFrame(frame);
       })
     );

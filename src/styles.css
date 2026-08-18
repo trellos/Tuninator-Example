@@ -576,6 +576,17 @@ body {
   color: var(--bad);
 }
 
+/* The channel the library actually selected. With hysteresis in play this is
+   not always the tallest bar, which is exactly why it has to be drawn. */
+.channel-row[data-selected="yes"] .channel-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.channel-row[data-selected="yes"] .channel-label::after {
+  content: " ◂";
+}
+
 .channel-note {
   font-size: 11.5px;
   color: var(--text-muted);
@@ -1176,6 +1187,18 @@ body {
    layer's glow rather than only a colour change. */
 .channel-row[data-silent="yes"] .channel-label,
 .channel-row[data-silent="yes"] .channel-db {
+  text-shadow: var(--glow-1);
+}
+
+/* The selected channel is live state, so it belongs on the accent layer rather
+   than reading as merely brighter text. Weight drops from 600 to 500 because
+   only Roboto Mono 400/500 are self-hosted — 600 synthesises, and synthetic
+   bold on an 11px mono face smears under the scanline overlay. The " ◂" marker
+   the feature already draws is left alone: it carries the state without relying
+   on colour, which is the rule this whole palette is held to. */
+.channel-row[data-selected="yes"] .channel-label {
+  color: var(--accent);
+  font-weight: 500;
   text-shadow: var(--glow-1);
 }
 

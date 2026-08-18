@@ -575,6 +575,10 @@ class MockTuninator implements Tuninator {
         // Stands in for a healthy stereo capture, so the per-channel meters
         // show what a working 2-in interface looks like.
         channelRms: [0.001 + Math.abs(jitter(t, 0.0008)), 0.0012 + Math.abs(jitter(t + 7, 0.0008))],
+        // The real library latches a channel on the first real signal and keeps
+        // it through silence, so the mock does not flip back to "summing" every
+        // time a note ends.
+        selectedChannel: 0,
         detector: {
           tau: null,
           cmnd: null,
@@ -610,6 +614,7 @@ class MockTuninator implements Tuninator {
         peak: 0.05 + envelope * 0.38,
       },
       channelRms: [0.014 + envelope * 0.11, 0.011 + envelope * 0.09],
+      selectedChannel: 0,
       detector: {
         tau: EFFECTIVE_SAMPLE_RATE / frequencyHz,
         cmnd: clamp01(1 - confidence) * 0.35,

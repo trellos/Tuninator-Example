@@ -77,6 +77,104 @@ function check(label, ok, detail = "") {
   if (!ok) failures.push(label);
 }
 
+/**
+ * Regression test for the stereo-interface bug.
+ *
+ * A 2-in interface ("Analogue 1/2 (Audient iD4)") is a single *stereo* device to
+ * the browser, so an instrument plugged into input 2 exists only on channel 1.
+ * Every link in the chain can silently drop it -- getUserMedia can open the
+ * device in mono, and the worklet can read channel 0 and nothing else -- and the
+ * failure is invisible: no pitch, no level, no error, exactly like a detector
+ * that does not work at all.
+ *
+ * So: shim `getUserMedia` to hand back a synthetic 2-channel MediaStream with a
+ * 220Hz sawtooth on channel 1 and pure silence on channel 0, then drive the
+ * demo's REAL live path end to end and assert it still finds A3. This exercises
+ * the whole chain -- constraints, MediaStreamAudioSourceNode, the worklet node's
+ * channel configuration, the worklet's channel summing -- against the exact
+ * signal shape that used to produce silence.
+ */
+async function runStereoChannelCheck(page) {
+  await page.addInitScript(() => {
+    const media = navigator.mediaDevices;
+    const original = media.getUserMedia.bind(media);
+    window.__stereoShim = { constraints: null, used: false };
+    media.getUserMedia = async (constraints) => {
+      window.__stereoShim.constraints = JSON.parse(JSON.stringify(constraints ?? {}));
+      window.__stereoShim.used = true;
+      // Keep a reference on window: a garbage-collected AudioContext stops the
+      // oscillator and the "stream" goes quiet halfway through the test.
+      const context = new AudioContext();
+      window.__stereoShim.context = context;
+      const oscillator = new OscillatorNode(context, { frequency: 220, type: "sawtooth" });
+      const gain = new GainNode(context, { gain: 0.3 });
+      const merger = new ChannelMergerNode(context, { numberOfInputs: 2 });
+      oscillator.connect(gain);
+      // Input 1 of the merger is channel 1. Channel 0 is left unconnected, i.e.
+      // exactly the silence an unused mic input produces.
+      gain.connect(merger, 0, 1);
+      const destination = new MediaStreamAudioDestinationNode(context, { channelCount: 2 });
+      merger.connect(destination);
+      oscillator.start();
+      void original;
+      return destination.stream;
+    };
+  });
+
+  await page.goto(`${ORIGIN}/?mock=0`, { waitUntil: "load" });
+  await page.click("#listen-btn");
+  await page.waitForFunction(
+    () => document.getElementById("state-pill")?.textContent === "listening",
+    undefined,
+    { timeout: 15_000 }
+  );
+  await page.waitForTimeout(3000);
+
+  const constraints = await page.evaluate(() => window.__stereoShim?.constraints ?? null);
+  check(
+    "stereo: getUserMedia was asked for 2 channels",
+    constraints?.audio?.channelCount === 2,
+    JSON.stringify(constraints?.audio ?? null)
+  );
+
+  const noteText = (await page.locator("#note-name").innerText()).trim();
+  const frequencyText = (await page.locator("#frequency-value").innerText()).trim();
+  const hz = Number.parseFloat(frequencyText);
+  check(
+    "stereo: a tone present ONLY on channel 1 is still detected",
+    noteText === "A" && Math.abs(hz - 220) < 3,
+    `${noteText} @ ${frequencyText}`
+  );
+
+  const probe = await page.evaluate(() => window.__tuninatorDemo ?? null);
+  check(
+    "stereo: pitch frames flowed from the two-channel stream",
+    (probe?.frames ?? 0) > 50,
+    `frames=${probe?.frames}`
+  );
+
+  // The diagnostic half: the demo has to make "channel 0 is dead" visible,
+  // because that is the difference between a wiring mistake and a broken app.
+  const channels = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll("#channel-meters .channel-row")];
+    return {
+      count: rows.length,
+      silent: rows.map((row) => row.getAttribute("data-silent")),
+      note: document.getElementById("channel-note")?.textContent ?? "",
+    };
+  });
+  check(
+    "stereo: the demo shows both input channels",
+    channels.count === 2,
+    `${channels.count} rows`
+  );
+  check(
+    "stereo: the demo marks the silent channel as silent",
+    channels.silent[0] === "yes" && channels.silent[1] === "no",
+    `ch0=${channels.silent[0]} ch1=${channels.silent[1]} note="${channels.note}"`
+  );
+}
+
 async function main() {
   console.log("→ building");
   await run("npx", ["vite", "build", "--logLevel", "warn"]);
@@ -265,6 +363,8 @@ async function main() {
         (liveProbe?.frames ?? 0) > 50,
         `frames=${liveProbe?.frames}`
       );
+
+      await runStereoChannelCheck(page);
     }
 
     // --- screenshot: back to the good path, one full phrase on screen -------

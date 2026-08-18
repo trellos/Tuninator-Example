@@ -8,9 +8,10 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches:
-      # TODO: once this branch's work merges, drop it here and update
-      # LIBRARY_REF below to track `main` instead of the dev branch directly.
       - main
+      # trellos/Tuninator has merged (LIBRARY_REF below tracks its main), but
+      # this repo's own demo work is still on this branch. Drop it once this
+      # branch merges here too.
       - claude/tuninator-orchestration-agent-phcm0m
   workflow_dispatch: {}
 
@@ -30,8 +31,8 @@ env:
   # Branch/tag/commit of trellos/Tuninator to build the library from. The demo
   # repo's own state doesn't determine which library version it runs against,
   # so this is pinned explicitly rather than left to default-branch drift.
-  # TODO: switch to "main" once the library work on this branch is merged.
-  LIBRARY_REF: claude/tuninator-orchestration-agent-phcm0m
+  # trellos/Tuninator#1 merged the library into main; track that.
+  LIBRARY_REF: main
 
 jobs:
   build:

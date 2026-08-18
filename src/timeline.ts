@@ -20,6 +20,8 @@
 
 import type { MusicEvent, MusicEventKind, MusicEventState } from "tuninator";
 
+import { readTheme, withAlpha, type CanvasTheme } from "./theme.js";
+
 import type { BeatGrid } from "./metronome.js";
 
 /** Beats of history on screen. */
@@ -132,17 +134,27 @@ function extractPitches(event: MusicEvent): { pitches: number[]; primary: number
 /* Colour                                                                      */
 /* -------------------------------------------------------------------------- */
 
-/** Hue by pitch class, so the same note is always the same colour. */
-function hueOf(midi: number): number {
+/**
+ * Hue by pitch class, so the same note is always the same colour.
+ *
+ * The ramp is deliberately an ARC, not the full colour wheel: sweeping all
+ * 360 degrees emits greens and oranges that sit outside the cyberpunk palette.
+ * Spanning hueBase..hueBase+hueSpan (cyan -> violet -> magenta) keeps every
+ * bar on-palette while preserving the encoding — twelve pitch classes still
+ * map to twelve distinguishable hues.
+ */
+function hueOf(midi: number, theme: CanvasTheme): number {
   const pitchClass = ((Math.round(midi) % 12) + 12) % 12;
-  return (pitchClass * 30 + 190) % 360;
+  return (theme.hueBase + (pitchClass / 12) * theme.hueSpan) % 360;
 }
 
-function colourFor(midi: number, alpha: number, lift = 0): string {
-  const hue = hueOf(midi);
-  // Higher notes read brighter, which reinforces the vertical axis.
-  const light = Math.min(78, 44 + (midi - DEFAULT_LOW_MIDI) * 0.42 + lift);
-  return `hsla(${hue}, 74%, ${light}%, ${alpha})`;
+function colourFor(midi: number, alpha: number, theme: CanvasTheme, lift = 0): string {
+  const hue = hueOf(midi, theme);
+  // Higher notes read brighter, which reinforces the vertical axis. The floor
+  // is lifted from 44 to 52 because the ground is now pure black, where the
+  // darkest bars previously disappeared.
+  const light = Math.min(80, 52 + (midi - DEFAULT_LOW_MIDI) * 0.42 + lift);
+  return `hsla(${hue}, ${theme.sat}%, ${light}%, ${alpha})`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -167,6 +179,8 @@ export class Timeline {
   #rafId: number | null = null;
   #observer: ResizeObserver | null = null;
   #hint = "Press Start to listen.";
+  /** Cached: getComputedStyle inside the draw loop would thrash layout. */
+  #theme: CanvasTheme = readTheme();
 
   constructor(canvas: HTMLCanvasElement, options: TimelineOptions) {
     this.#canvas = canvas;
@@ -176,6 +190,7 @@ export class Timeline {
     if (!ctx) throw new Error("Timeline: 2D canvas context is unavailable.");
     this.#ctx = ctx;
 
+    this.#theme = readTheme();
     this.#resize();
     if (typeof ResizeObserver !== "undefined") {
       this.#observer = new ResizeObserver(() => this.#resize());
@@ -267,7 +282,7 @@ export class Timeline {
     this.#updatePitchRange();
 
     const ctx = this.#ctx;
-    ctx.fillStyle = "#0d1117";
+    ctx.fillStyle = this.#theme.ground;
     ctx.fillRect(0, 0, width, height);
 
     this.#drawPitchGuides(width, height);
@@ -276,8 +291,8 @@ export class Timeline {
     this.#drawPlayhead(width, height);
 
     if (this.#events.size === 0 && this.#hint) {
-      ctx.fillStyle = "rgba(201, 209, 217, 0.45)";
-      ctx.font = '13px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+      ctx.fillStyle = this.#theme.hint;
+      ctx.font = `14px ${this.#theme.fontMono}`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(this.#hint, width / 2, height / 2);
@@ -335,20 +350,20 @@ export class Timeline {
 
   #drawPitchGuides(width: number, height: number): void {
     const ctx = this.#ctx;
-    ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.font = `10px ${this.#theme.fontMono}`;
     ctx.textBaseline = "middle";
 
     const first = Math.ceil(this.#lowMidi / 12) * 12;
     for (let midi = first; midi <= this.#highMidi; midi += 12) {
       const y = this.#yOf(midi, height);
-      ctx.strokeStyle = "rgba(139, 148, 158, 0.16)";
+      ctx.strokeStyle = this.#theme.guide;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(0, Math.round(y) + 0.5);
       ctx.lineTo(width, Math.round(y) + 0.5);
       ctx.stroke();
 
-      ctx.fillStyle = "rgba(139, 148, 158, 0.5)";
+      ctx.fillStyle = this.#theme.guideText;
       ctx.fillText(`C${Math.round(midi) / 12 - 1}`, 4, y - 7);
     }
   }
@@ -364,7 +379,7 @@ export class Timeline {
     const firstBeat = Math.ceil((oldest - originMs) / periodMs);
     const lastBeat = Math.floor((now - originMs) / periodMs);
 
-    ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.font = `10px ${this.#theme.fontMono}`;
     ctx.textBaseline = "top";
 
     for (let beat = firstBeat; beat <= lastBeat; beat += 1) {
@@ -373,7 +388,7 @@ export class Timeline {
       if (x < 0 || x > width) continue;
 
       const isBarLine = ((beat % beatsPerBar) + beatsPerBar) % beatsPerBar === 0;
-      ctx.strokeStyle = isBarLine ? "rgba(88, 166, 255, 0.34)" : "rgba(139, 148, 158, 0.14)";
+      ctx.strokeStyle = isBarLine ? this.#theme.barLine : this.#theme.guide;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(x, isBarLine ? 0 : PAD_TOP);
@@ -386,7 +401,7 @@ export class Timeline {
       if (isBarLine) {
         const barNumber = Math.floor(beat / beatsPerBar) + 1;
         if (barNumber >= 1) {
-          ctx.fillStyle = "rgba(88, 166, 255, 0.6)";
+          ctx.fillStyle = this.#theme.barLineText;
           ctx.fillText(String(barNumber), x + 3, height - PAD_BOTTOM + 8);
         }
       }
@@ -413,8 +428,8 @@ export class Timeline {
       for (const pitch of event.pitches) {
         if (event.primary !== null && Math.abs(pitch - event.primary) < 0.001) continue;
         const y = this.#yOf(pitch, height);
-        ctx.fillStyle = colourFor(pitch, alpha * 0.5);
-        roundRect(ctx, left, y - CHORD_TONE_HEIGHT / 2, barWidth, CHORD_TONE_HEIGHT, 2);
+        ctx.fillStyle = colourFor(pitch, alpha * 0.5, this.#theme);
+        cutRect(ctx, left, y - CHORD_TONE_HEIGHT / 2, barWidth, CHORD_TONE_HEIGHT, 2);
         ctx.fill();
       }
 
@@ -425,15 +440,15 @@ export class Timeline {
         this.#drawBentBar(event, now, width, height, alpha);
       } else {
         const y = this.#yOf(event.primary, height);
-        ctx.fillStyle = colourFor(event.primary, alpha, 6);
-        roundRect(ctx, left, y - BAR_HEIGHT / 2, barWidth, BAR_HEIGHT, 3);
+        ctx.fillStyle = colourFor(event.primary, alpha, this.#theme, 6);
+        cutRect(ctx, left, y - BAR_HEIGHT / 2, barWidth, BAR_HEIGHT, 3);
         ctx.fill();
       }
 
       // Attack marker: a bright cap at the note's onset.
       if (x0 >= -2 && x0 <= width) {
         const y = this.#yOf(event.trace[0]?.pitch ?? event.primary, height);
-        ctx.fillStyle = `rgba(255,255,255,${0.55 * alpha})`;
+        ctx.fillStyle = withAlpha(this.#theme.highlight, 0.55 * alpha);
         ctx.fillRect(Math.max(0, x0), y - BAR_HEIGHT / 2, 2, BAR_HEIGHT);
       }
 
@@ -470,7 +485,7 @@ export class Timeline {
       if (point) ctx.lineTo(point.x, point.y + half);
     }
     ctx.closePath();
-    ctx.fillStyle = colourFor(event.primary ?? 60, alpha, 6);
+    ctx.fillStyle = colourFor(event.primary ?? 60, alpha, this.#theme, 6);
     ctx.fill();
 
     // A dashed ghost at the origin pitch makes the excursion legible.
@@ -479,7 +494,7 @@ export class Timeline {
       const y = this.#yOf(originPitch, height);
       ctx.save();
       ctx.setLineDash([3, 3]);
-      ctx.strokeStyle = `rgba(255,255,255,${0.3 * alpha})`;
+      ctx.strokeStyle = withAlpha(this.#theme.highlight, 0.3 * alpha);
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(firstPoint.x, y);
@@ -503,15 +518,15 @@ export class Timeline {
     const text = event.label;
     ctx.font =
       event.kind === "chord"
-        ? '600 11px ui-sans-serif, system-ui, -apple-system, sans-serif'
-        : '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+        ? `500 11px ${this.#theme.fontMono}`
+        : `11px ${this.#theme.fontMono}`;
     const metrics = ctx.measureText(text);
     if (metrics.width + 8 > available) return;
 
     const y = this.#yOf(event.primary, height);
-    ctx.fillStyle = `rgba(13, 17, 23, ${0.55 * alpha})`;
+    ctx.fillStyle = withAlpha(this.#theme.plate, 0.72 * alpha);
     ctx.fillRect(left + 3, y - BAR_HEIGHT / 2 - 14, metrics.width + 4, 13);
-    ctx.fillStyle = `rgba(230, 237, 243, ${Math.min(1, alpha + 0.15)})`;
+    ctx.fillStyle = withAlpha(this.#theme.plateText, Math.min(1, alpha + 0.15));
     ctx.textBaseline = "top";
     ctx.fillText(text, left + 5, y - BAR_HEIGHT / 2 - 13);
   }
@@ -519,7 +534,7 @@ export class Timeline {
   #drawPlayhead(width: number, height: number): void {
     const ctx = this.#ctx;
     const x = width - 0.5;
-    ctx.strokeStyle = "rgba(255, 122, 89, 0.85)";
+    ctx.strokeStyle = this.#theme.playhead;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(x, 0);
@@ -527,8 +542,8 @@ export class Timeline {
     ctx.stroke();
 
     const gradient = ctx.createLinearGradient(width - 48, 0, width, 0);
-    gradient.addColorStop(0, "rgba(255, 122, 89, 0)");
-    gradient.addColorStop(1, "rgba(255, 122, 89, 0.10)");
+    gradient.addColorStop(0, withAlpha(this.#theme.playhead, 0));
+    gradient.addColorStop(1, withAlpha(this.#theme.playhead, 0.1));
     ctx.fillStyle = gradient;
     ctx.fillRect(width - 48, 0, 48, height);
   }
@@ -559,6 +574,29 @@ export class Timeline {
 
 function clamp01(value: number): number {
   return value < 0 ? 0 : value > 1 ? 1 : value;
+}
+
+/**
+ * 45-degree chamfered rectangle — the canvas counterpart of the CSS corner
+ * cuts, so bars and panels share one geometry language.
+ */
+function cutRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  cut: number
+): void {
+  const c = Math.min(cut, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + c, y);
+  ctx.lineTo(x + width, y);
+  ctx.lineTo(x + width, y + height - c);
+  ctx.lineTo(x + width - c, y + height);
+  ctx.lineTo(x, y + height);
+  ctx.lineTo(x, y + c);
+  ctx.closePath();
 }
 
 function roundRect(

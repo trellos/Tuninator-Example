@@ -7,8 +7,9 @@
          browser never 404s on /favicon.ico). -->
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1117'/%3E%3Cg stroke='%2358a6ff' stroke-width='2.6' stroke-linecap='round'%3E%3Cpath d='M10 6v9a6 6 0 0 0 12 0V6'/%3E%3Cpath d='M16 21v6'/%3E%3C/g%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M0 0h32v25l-7 7H0z' fill='%23000000'/%3E%3Cg stroke='%2300ffff' stroke-width='2.6' stroke-linecap='round'%3E%3Cpath d='M10 6v9a6 6 0 0 0 12 0V6'/%3E%3Cpath d='M16 21v6'/%3E%3C/g%3E%3C/svg%3E"
     />
+    <meta name="theme-color" content="#000000" />
     <title>Tuninator — browser demo</title>
     <meta
       name="description"
@@ -24,6 +25,15 @@
         </div>
         <span class="badge" id="source-badge" data-kind="mock">mock input</span>
       </header>
+
+      <!-- Decorative status strip. Static text only: the live values it mirrors
+           already have their own accessible readouts below. -->
+      <div class="sys-rail" aria-hidden="true">
+        <span>sys<b>//</b>tuninator</span>
+        <span>clk<b>90</b>bpm</span>
+        <span>win<b>16</b>beat</span>
+        <span>span<b>10.67</b>s</span>
+      </div>
 
       <section class="toolbar" aria-label="Transport">
         <button id="listen-btn" class="btn primary" type="button">Start listening</button>
@@ -148,14 +158,21 @@
       </section>
 
       <footer class="app-footer">
+        <details>
+          <summary>debug parameters</summary>
         <p>
           <code>?mock=1</code> forces the synthetic source ·
           <code>?mock=0</code> forces the real library ·
           <code>?failWith=mic-permission-denied</code> exercises the error UI ·
           <code>?workletUrl=/nope.js</code> exercises <code>worklet-load-failed</code>
         </p>
+        </details>
       </footer>
     </div>
+
+    <!-- Scanline + grain overlay. Absolute (not fixed) so it spans the whole
+         document rather than one viewport — see the cyberpunk-ui skill. -->
+    <div class="fx" aria-hidden="true"></div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

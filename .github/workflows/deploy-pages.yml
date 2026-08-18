@@ -9,10 +9,6 @@ on:
   push:
     branches:
       - main
-      # trellos/Tuninator has merged (LIBRARY_REF below tracks its main), but
-      # this repo's own demo work is still on this branch. Drop it once this
-      # branch merges here too.
-      - claude/tuninator-orchestration-agent-phcm0m
   workflow_dispatch: {}
 
 permissions:

@@ -1,0 +1,84 @@
+/* cyberpunk-ui — drop-in token layer.
+ *
+ * Palette values are the ones stated in the source video (see
+ * references/video-guideline.md). Everything else — spacing of the chamfer,
+ * glow ramp, grid pitch — is this skill's interpretation.
+ *
+ * Copy into a project and rename the tokens to match its existing names where
+ * they already exist. Revaluing an existing token beats introducing a new one.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* --- grounds ------------------------------------------------------- */
+  --bg: #000000;
+  --bg-raised: #0a0a0a;
+  --bg-sunken: #050505;
+
+  /* --- lines --------------------------------------------------------- */
+  --border: #2a2a2a;
+  --border-soft: #171717;
+  --line: color-mix(in srgb, var(--accent) 22%, var(--border));
+
+  /* --- text (never neon) --------------------------------------------- */
+  --text: #e6e6e6;
+  --text-muted: #8a8a8a;
+
+  /* --- neon: primaries ------------------------------------------------ */
+  --accent: #00ffff;    /* cyan    — primary interactive */
+  --accent-2: #ff00ff;  /* magenta — secondary / active  */
+  --good: #00ff00;      /* green   — ok / live           */
+
+  /* --- neon: secondaries ---------------------------------------------- */
+  --near: #ffd700;      /* gold       — warn / pending   */
+  --bad: #ff4500;       /* orange-red — error            */
+  --violet: #b967ff;    /* extension  — 4th category     */
+
+  /* Text-tier variants for the 5-7:1 hues, when used on small labels. */
+  --bad-text: #ff6a33;
+  --violet-text: #cd93ff;
+
+  /* --- geometry ------------------------------------------------------- */
+  --radius: 0;
+  --cut: 10px;      /* chamfer on panels  */
+  --cut-sm: 6px;    /* chamfer on controls */
+
+  /* --- glow (zero-offset, coloured; never an offset drop shadow) ------ */
+  --glow-1: 0 0 4px color-mix(in srgb, currentColor 70%, transparent);
+  --glow-2: 0 0 12px color-mix(in srgb, currentColor 45%, transparent);
+  --glow-3: 0 0 26px color-mix(in srgb, currentColor 25%, transparent);
+
+  /* --- texture -------------------------------------------------------- */
+  --grid-line: color-mix(in srgb, var(--accent) 4%, transparent);
+  --grid-pitch: 32px;
+  --scanline: rgba(0, 0, 0, 0.28);
+
+  /* --- focus ---------------------------------------------------------- */
+  --focus: var(--accent);
+
+  /* --- type ----------------------------------------------------------- */
+  --font-display: "VT323", "Share Tech Mono", ui-monospace, monospace;
+  --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Decoration stops; data keeps moving. See SKILL.md § Motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Users who asked for more contrast get the texture removed, not dimmed. */
+@media (prefers-contrast: more) {
+  :root {
+    --text: #ffffff;
+    --text-muted: #b8b8b8;
+    --scanline: transparent;
+    --grid-line: transparent;
+  }
+}

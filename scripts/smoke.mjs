@@ -168,18 +168,31 @@ async function main() {
       if (!ctx) return null;
       const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
+      // The timeline clears to --canvas-ground (which tracks --bg). Read it
+      // rather than hardcoding a triple, so a re-theme cannot silently turn
+      // this check vacuous by moving the ground out from under it.
+      const groundCss = getComputedStyle(document.documentElement)
+        .getPropertyValue("--canvas-ground")
+        .trim();
+      const probe = document.createElement("canvas");
+      probe.width = probe.height = 1;
+      const pctx = probe.getContext("2d");
+      pctx.fillStyle = groundCss || "#000000";
+      pctx.fillRect(0, 0, 1, 1);
+      const [gr, gg, gb] = pctx.getImageData(0, 0, 1, 1).data;
+
       const colours = new Set();
       let nonBackground = 0;
-      // The timeline paints #0d1117 as its ground.
       for (let i = 0; i < data.length; i += 4) {
         const r = data[i], g = data[i + 1], b = data[i + 2];
-        if (Math.abs(r - 13) > 6 || Math.abs(g - 17) > 6 || Math.abs(b - 23) > 6) nonBackground += 1;
+        if (Math.abs(r - gr) > 6 || Math.abs(g - gg) > 6 || Math.abs(b - gb) > 6) nonBackground += 1;
         if (colours.size < 4096) colours.add((r << 16) | (g << 8) | b);
       }
       return {
         width,
         height,
         cssWidth: canvas.clientWidth,
+        ground: [gr, gg, gb],
         nonBackground,
         total: data.length / 4,
         distinctColours: colours.size,
@@ -197,7 +210,7 @@ async function main() {
     check(
       "timeline actually drew content",
       inkRatio > 0.01,
-      `${(inkRatio * 100).toFixed(2)}% of pixels non-background`
+      `${(inkRatio * 100).toFixed(2)}% of pixels non-background (ground rgb(${pixels?.ground}))`
     );
     check(
       "timeline drew coloured note bars, not just gridlines",

@@ -23,6 +23,12 @@ import { createMockTuninator } from "./mock-tuninator.js";
 import { Timeline, WINDOW_BEATS } from "./timeline.js";
 import { Ui, type SourceChoice } from "./ui.js";
 
+// Self-hosted via @fontsource rather than a Google Fonts <link>: keeps the
+// demo working offline and makes the smoke screenshot deterministic. The two
+// faces are the ones the cyberpunk-ui skill's source video names.
+import "@fontsource/roboto-mono/latin-400.css";
+import "@fontsource/roboto-mono/latin-500.css";
+import "@fontsource/vt323/latin-400.css";
 import "./styles.css";
 
 /**
@@ -471,7 +477,11 @@ function boot(): void {
     // The UI itself failed to construct; there is no banner to render into.
     const error = toTuninatorError(cause);
     const fallback = document.createElement("pre");
-    fallback.style.cssText = "padding:24px;color:#ff7b72;font:13px ui-monospace,monospace";
+    // Literal rather than tokenised on purpose: this path runs when the UI
+    // failed to construct, which may mean the stylesheet never applied, so it
+    // cannot rely on var(--bad). Kept on-palette by hand.
+    fallback.style.cssText =
+      "padding:24px;color:#ff4500;background:#000;font:13px ui-monospace,monospace";
     fallback.textContent = `Demo failed to start (${error.code}): ${error.message}`;
     document.body.prepend(fallback);
     console.error(cause);

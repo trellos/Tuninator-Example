@@ -116,12 +116,17 @@
             </dd>
 
             <!--
-              Per-input-channel level, from PitchFrame.channelRms.
+              Per-input-channel level, from PitchFrame.channelRms, and the
+              channel being analysed, from PitchFrame.selectedChannel.
 
               A 2-in interface is a single stereo device to the browser, so an
               instrument in input 2 arrives only on channel 1. Without this row
               a dead channel and a dead detector look identical: no pitch, no
               confidence, a flat level meter, and no error anywhere.
+
+              The selected channel is marked separately because it cannot be
+              read off the bars: selection is hysteretic, so the tallest bar in
+              a given frame is routinely not the one being listened to.
             -->
             <dt>channels</dt>
             <dd>

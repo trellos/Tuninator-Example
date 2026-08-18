@@ -522,6 +522,17 @@ body {
   color: var(--bad);
 }
 
+/* The channel the library actually selected. With hysteresis in play this is
+   not always the tallest bar, which is exactly why it has to be drawn. */
+.channel-row[data-selected="yes"] .channel-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.channel-row[data-selected="yes"] .channel-label::after {
+  content: " ◂";
+}
+
 .channel-note {
   font-size: 11.5px;
   color: var(--text-muted);

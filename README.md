@@ -45,6 +45,7 @@ parent/
 | `?mode=lead\|chords\|rhythm\|raw` | initial `TuninatorMode` |
 | `?workletUrl=/nope.js` | point the library at a missing worklet, to exercise `worklet-load-failed` |
 | `?failWith=<TuninatorErrorCode>` | make the mock's `start()` fail with that code, to exercise the error UI |
+| `?channels=auto\|sum\|<index>` | `input.channels` — which input channel(s) the library analyses. `auto` (the default) selects the loudest; `sum` is the only way to *see* a mic and a DI of one guitar comb-filter into an octave error |
 | `?metronome=1` | start the metronome on load |
 | `?autostart=1` | start listening on load |
 

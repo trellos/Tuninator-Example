@@ -78,6 +78,96 @@ function check(label, ok, detail = "") {
 }
 
 /**
+ * Installs a `getUserMedia` shim that synthesises a two-channel MediaStream.
+ *
+ * Registered once; the scenario is chosen per navigation with `?shim=`, because
+ * `addInitScript` accumulates for the lifetime of the page and two competing
+ * overrides of `getUserMedia` would depend on registration order.
+ *
+ *   shim=silent-ch0 — 220Hz sawtooth on channel 1, channel 0 unconnected. The
+ *                     2-in interface with a guitar in input 2.
+ *   shim=comb       — ONE 164.81Hz (E3) sawtooth captured twice: a DI on
+ *                     channel 0 and a cab mic 3ms away (about a metre of air)
+ *                     on channel 1.
+ */
+async function installMediaShim(page) {
+  await page.addInitScript(() => {
+    const media = navigator.mediaDevices;
+    const original = media.getUserMedia.bind(media);
+    window.__stereoShim = { constraints: null, used: false, mode: null };
+    media.getUserMedia = async (constraints) => {
+      const mode = new URLSearchParams(location.search).get("shim");
+      if (!mode) return original(constraints);
+
+      window.__stereoShim.constraints = JSON.parse(JSON.stringify(constraints ?? {}));
+      window.__stereoShim.used = true;
+      window.__stereoShim.mode = mode;
+
+      // Keep a reference on window: a garbage-collected AudioContext stops the
+      // oscillator and the "stream" goes quiet halfway through the test.
+      const context = new AudioContext();
+      window.__stereoShim.context = context;
+      const merger = new ChannelMergerNode(context, { numberOfInputs: 2 });
+      const destination = new MediaStreamAudioDestinationNode(context, { channelCount: 2 });
+      merger.connect(destination);
+
+      if (mode === "comb") {
+        // One guitar, two captures. This is an ordinary rig, and summing it is
+        // the thing channel selection exists to avoid: 3ms is half a period of
+        // 166.7Hz, so at E3 the two copies arrive in antiphase, the odd
+        // harmonics cancel, and the sum's strongest periodicity is an octave up.
+        const oscillator = new OscillatorNode(context, { frequency: 164.81, type: "sawtooth" });
+        const di = new GainNode(context, { gain: 0.3 });
+        const mic = new GainNode(context, { gain: 0.24 });
+        const delay = new DelayNode(context, { delayTime: 0.003, maxDelayTime: 0.05 });
+        oscillator.connect(di);
+        di.connect(merger, 0, 0);
+        oscillator.connect(delay);
+        delay.connect(mic);
+        mic.connect(merger, 0, 1);
+        oscillator.start();
+      } else {
+        const oscillator = new OscillatorNode(context, { frequency: 220, type: "sawtooth" });
+        const gain = new GainNode(context, { gain: 0.3 });
+        oscillator.connect(gain);
+        // Input 1 of the merger is channel 1. Channel 0 is left unconnected,
+        // i.e. exactly the silence an unused mic input produces.
+        gain.connect(merger, 0, 1);
+        oscillator.start();
+      }
+
+      return destination.stream;
+    };
+  });
+}
+
+/** Starts the demo's REAL live path against the shim and waits for `listening`. */
+async function listenWithShim(page, query) {
+  await page.goto(`${ORIGIN}/?mock=0&${query}`, { waitUntil: "load" });
+  await page.click("#listen-btn");
+  await page.waitForFunction(
+    () => document.getElementById("state-pill")?.textContent === "listening",
+    undefined,
+    { timeout: 15_000 }
+  );
+  // Long enough for the channel selector's 250ms window to close and latch.
+  await page.waitForTimeout(3000);
+}
+
+/** Reads the demo's per-channel diagnostics panel. */
+function readChannelPanel(page) {
+  return page.evaluate(() => {
+    const rows = [...document.querySelectorAll("#channel-meters .channel-row")];
+    return {
+      count: rows.length,
+      silent: rows.map((row) => row.getAttribute("data-silent")),
+      selected: rows.map((row) => row.getAttribute("data-selected")),
+      note: document.getElementById("channel-note")?.textContent ?? "",
+    };
+  });
+}
+
+/**
  * Regression test for the stereo-interface bug.
  *
  * A 2-in interface ("Analogue 1/2 (Audient iD4)") is a single *stereo* device to
@@ -87,48 +177,14 @@ function check(label, ok, detail = "") {
  * failure is invisible: no pitch, no level, no error, exactly like a detector
  * that does not work at all.
  *
- * So: shim `getUserMedia` to hand back a synthetic 2-channel MediaStream with a
- * 220Hz sawtooth on channel 1 and pure silence on channel 0, then drive the
- * demo's REAL live path end to end and assert it still finds A3. This exercises
- * the whole chain -- constraints, MediaStreamAudioSourceNode, the worklet node's
- * channel configuration, the worklet's channel summing -- against the exact
- * signal shape that used to produce silence.
+ * So: 220Hz on channel 1, silence on channel 0, driven through the demo's REAL
+ * live path end to end. This exercises the whole chain -- constraints,
+ * MediaStreamAudioSourceNode, the worklet node's channel configuration, the
+ * worklet's channel handling -- against the exact signal shape that used to
+ * produce silence.
  */
 async function runStereoChannelCheck(page) {
-  await page.addInitScript(() => {
-    const media = navigator.mediaDevices;
-    const original = media.getUserMedia.bind(media);
-    window.__stereoShim = { constraints: null, used: false };
-    media.getUserMedia = async (constraints) => {
-      window.__stereoShim.constraints = JSON.parse(JSON.stringify(constraints ?? {}));
-      window.__stereoShim.used = true;
-      // Keep a reference on window: a garbage-collected AudioContext stops the
-      // oscillator and the "stream" goes quiet halfway through the test.
-      const context = new AudioContext();
-      window.__stereoShim.context = context;
-      const oscillator = new OscillatorNode(context, { frequency: 220, type: "sawtooth" });
-      const gain = new GainNode(context, { gain: 0.3 });
-      const merger = new ChannelMergerNode(context, { numberOfInputs: 2 });
-      oscillator.connect(gain);
-      // Input 1 of the merger is channel 1. Channel 0 is left unconnected, i.e.
-      // exactly the silence an unused mic input produces.
-      gain.connect(merger, 0, 1);
-      const destination = new MediaStreamAudioDestinationNode(context, { channelCount: 2 });
-      merger.connect(destination);
-      oscillator.start();
-      void original;
-      return destination.stream;
-    };
-  });
-
-  await page.goto(`${ORIGIN}/?mock=0`, { waitUntil: "load" });
-  await page.click("#listen-btn");
-  await page.waitForFunction(
-    () => document.getElementById("state-pill")?.textContent === "listening",
-    undefined,
-    { timeout: 15_000 }
-  );
-  await page.waitForTimeout(3000);
+  await listenWithShim(page, "shim=silent-ch0");
 
   const constraints = await page.evaluate(() => window.__stereoShim?.constraints ?? null);
   check(
@@ -153,16 +209,19 @@ async function runStereoChannelCheck(page) {
     `frames=${probe?.frames}`
   );
 
+  // Automatic selection: the only channel carrying signal is the one it must
+  // settle on, and it must SAY so -- `channelRms` cannot answer this, because
+  // selection is hysteretic and the loudest channel in a given frame is
+  // routinely not the selected one.
+  check(
+    "stereo: selection latched onto the channel carrying the instrument",
+    probe?.selectedChannel === 1,
+    `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`
+  );
+
   // The diagnostic half: the demo has to make "channel 0 is dead" visible,
   // because that is the difference between a wiring mistake and a broken app.
-  const channels = await page.evaluate(() => {
-    const rows = [...document.querySelectorAll("#channel-meters .channel-row")];
-    return {
-      count: rows.length,
-      silent: rows.map((row) => row.getAttribute("data-silent")),
-      note: document.getElementById("channel-note")?.textContent ?? "",
-    };
-  });
+  const channels = await readChannelPanel(page);
   check(
     "stereo: the demo shows both input channels",
     channels.count === 2,
@@ -172,6 +231,71 @@ async function runStereoChannelCheck(page) {
     "stereo: the demo marks the silent channel as silent",
     channels.silent[0] === "yes" && channels.silent[1] === "no",
     `ch0=${channels.silent[0]} ch1=${channels.silent[1]} note="${channels.note}"`
+  );
+  check(
+    "stereo: the demo shows which channel is being listened to",
+    channels.selected[1] === "yes" && channels.note.includes("ch1"),
+    `selected=[${channels.selected}] note="${channels.note}"`
+  );
+}
+
+/**
+ * The reason selection exists rather than summing.
+ *
+ * A DI and a cab mic of the SAME guitar is an ordinary rig, and the mic's
+ * acoustic delay makes the two channels a comb filter when they are added
+ * together. At 3ms (about a metre of air) the null lands on the odd harmonics
+ * of E3, and the sum that reaches the detector reads an octave high.
+ *
+ * Both halves are asserted, against the same synthetic rig:
+ *   - `channels=sum` (the old behaviour, still available as an option) is wrong,
+ *   - the default `auto` picks one channel and is right.
+ *
+ * If summing ever stops failing here the first check is what says so, rather
+ * than the suite quietly passing on a claim it no longer tests.
+ */
+async function runCombFilterCheck(page) {
+  const E3 = 164.81;
+  const readPitch = async () => {
+    const note = (await page.locator("#note-name").innerText()).trim();
+    const hz = Number.parseFloat((await page.locator("#frequency-value").innerText()).trim());
+    return { note, hz };
+  };
+
+  await listenWithShim(page, "shim=comb&channels=sum");
+  const summed = await readPitch();
+  const summedProbe = await page.evaluate(() => window.__tuninatorDemo ?? null);
+  check(
+    "comb: `channels=sum` really does sum",
+    summedProbe?.selectedChannel === null,
+    `selectedChannel=${JSON.stringify(summedProbe?.selectedChannel)}`
+  );
+  check(
+    "comb: summing a DI and a 3ms-delayed mic of one guitar reads an octave high",
+    Number.isFinite(summed.hz) && summed.hz > E3 * 1.8,
+    `${summed.note} @ ${summed.hz}Hz (source is E3, ${E3}Hz)`
+  );
+
+  await listenWithShim(page, "shim=comb");
+  const selected = await readPitch();
+  const probe = await page.evaluate(() => window.__tuninatorDemo ?? null);
+  check(
+    "comb: selection picks a single channel instead of summing",
+    typeof probe?.selectedChannel === "number",
+    `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`
+  );
+  check(
+    "comb: the selected channel is detected as E3, not the octave",
+    selected.note === "E" && Math.abs(selected.hz - E3) < 4,
+    `${selected.note} @ ${selected.hz}Hz`
+  );
+
+  const channels = await readChannelPanel(page);
+  check(
+    "comb: the demo names the channel it settled on",
+    channels.selected.filter((value) => value === "yes").length === 1 &&
+      /listening to ch\d/.test(channels.note),
+    `selected=[${channels.selected}] note="${channels.note}"`
   );
 }
 
@@ -364,7 +488,9 @@ async function main() {
         `frames=${liveProbe?.frames}`
       );
 
+      await installMediaShim(page);
       await runStereoChannelCheck(page);
+      await runCombFilterCheck(page);
     }
 
     // --- screenshot: back to the good path, one full phrase on screen -------

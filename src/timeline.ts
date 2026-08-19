@@ -31,9 +31,17 @@ export const WINDOW_BEATS = 16;
 
 const BAR_HEIGHT = 11;
 const CHORD_TONE_HEIGHT = 7;
-const MIN_SEMITONE_SPAN = 20;
-const DEFAULT_LOW_MIDI = 40; // E2
-const DEFAULT_HIGH_MIDI = 76; // E5
+/**
+ * The vertical axis is fixed, not adaptive: low E open to the high e's 12th
+ * fret -- three octaves plus the low string, guitar's practical range.
+ *
+ * It used to ease toward whatever pitch span was currently sounding, which
+ * read as the whole picture drifting vertically underneath the bars. A pitch
+ * outside this fixed span still draws -- `#yOf` clamps to the top/bottom edge
+ * rather than dropping it.
+ */
+const LOW_MIDI = 40; // E2, open low E
+const HIGH_MIDI = 76; // E5, high e's 12th fret
 const TRACE_LIMIT = 512;
 const PAD_TOP = 18;
 const PAD_BOTTOM = 22;
@@ -172,7 +180,7 @@ function colourFor(midi: number, alpha: number, theme: CanvasTheme, lift = 0): s
   // Higher notes read brighter, which reinforces the vertical axis. The floor
   // is lifted from 44 to 52 because the ground is now pure black, where the
   // darkest bars previously disappeared.
-  const light = Math.min(80, 52 + (midi - DEFAULT_LOW_MIDI) * 0.42 + lift);
+  const light = Math.min(80, 52 + (midi - LOW_MIDI) * 0.42 + lift);
   return `hsla(${hue}, ${theme.sat}%, ${light}%, ${alpha})`;
 }
 
@@ -191,9 +199,6 @@ export class Timeline {
   #cssWidth = 0;
   #cssHeight = 0;
   #dpr = 1;
-
-  #lowMidi = DEFAULT_LOW_MIDI;
-  #highMidi = DEFAULT_HIGH_MIDI;
 
   #rafId: number | null = null;
   #observer: ResizeObserver | null = null;
@@ -325,7 +330,6 @@ export class Timeline {
     if (width <= 0 || height <= 0) return;
 
     this.#prune(now);
-    this.#updatePitchRange();
 
     const ctx = this.#ctx;
     ctx.fillStyle = this.#theme.ground;
@@ -352,9 +356,8 @@ export class Timeline {
   }
 
   #yOf(midi: number, height: number): number {
-    const span = this.#highMidi - this.#lowMidi;
     const usable = height - PAD_TOP - PAD_BOTTOM;
-    const ratio = (midi - this.#lowMidi) / span;
+    const ratio = (midi - LOW_MIDI) / (HIGH_MIDI - LOW_MIDI);
     return PAD_TOP + usable * (1 - Math.min(1, Math.max(0, ratio)));
   }
 
@@ -366,41 +369,13 @@ export class Timeline {
     }
   }
 
-  /** Keep every visible note on screen, easing rather than snapping. */
-  #updatePitchRange(): void {
-    let lo = Number.POSITIVE_INFINITY;
-    let hi = Number.NEGATIVE_INFINITY;
-    for (const note of this.#notes.values()) {
-      for (const pitch of note.pitches) {
-        if (pitch < lo) lo = pitch;
-        if (pitch > hi) hi = pitch;
-      }
-    }
-    if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
-      lo = DEFAULT_LOW_MIDI;
-      hi = DEFAULT_HIGH_MIDI;
-    }
-
-    let targetLow = Math.floor(lo) - 3;
-    let targetHigh = Math.ceil(hi) + 3;
-    const deficit = MIN_SEMITONE_SPAN - (targetHigh - targetLow);
-    if (deficit > 0) {
-      targetLow -= deficit / 2;
-      targetHigh += deficit / 2;
-    }
-
-    const ease = 0.08;
-    this.#lowMidi += (targetLow - this.#lowMidi) * ease;
-    this.#highMidi += (targetHigh - this.#highMidi) * ease;
-  }
-
   #drawPitchGuides(width: number, height: number): void {
     const ctx = this.#ctx;
     ctx.font = `10px ${this.#theme.fontMono}`;
     ctx.textBaseline = "middle";
 
-    const first = Math.ceil(this.#lowMidi / 12) * 12;
-    for (let midi = first; midi <= this.#highMidi; midi += 12) {
+    const first = Math.ceil(LOW_MIDI / 12) * 12;
+    for (let midi = first; midi <= HIGH_MIDI; midi += 12) {
       const y = this.#yOf(midi, height);
       ctx.strokeStyle = this.#theme.guide;
       ctx.lineWidth = 1;

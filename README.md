@@ -129,8 +129,11 @@ A canvas, redrawn on `requestAnimationFrame`.
   over a still-ringing chord is two bars, not one replacing the other.
 - **Beat gridlines come from the metronome's own clock**, so a note played on the click sits on a
   gridline. Bar lines (every 4 beats) are brighter and numbered.
-- **Pitch is the vertical axis**, with hue per pitch class and lightness rising with octave; the
-  range eases to fit whatever is on screen. Octave guides are labelled `C3`, `C4`, …
+- **Pitch is the vertical axis**, with hue per pitch class and lightness rising with octave, over a
+  **fixed** range: low E open to the high e's 12th fret (E2–E5, three octaves plus the low string).
+  It does not adapt to what's currently sounding — an earlier version eased toward the active pitch
+  span every frame, which read as the whole picture scrolling vertically. A pitch outside the fixed
+  range still draws, pinned to the top or bottom edge. Octave guides are labelled `C3`, `C4`, …
 - **Bars are labelled** `harmony.chordName ?? pitch.current.name`, and **dimmed in proportion to
   `confidence`** rather than hidden. A chord the recognizer will not name renders as `…`.
 - **Bends stay one Note.** The ribbon follows `pitch.contour` when the library supplies it

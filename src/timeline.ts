@@ -157,6 +157,17 @@ function extractPitches(note: Note): { pitches: number[]; primary: number | null
   return { pitches, primary: resolvedPrimary ?? null };
 }
 
+/** The vertical span of a pitch list, or null when there is nothing to span. */
+function pitchExtent(pitches: readonly number[]): { lo: number; hi: number } | null {
+  let lo = Number.POSITIVE_INFINITY;
+  let hi = Number.NEGATIVE_INFINITY;
+  for (const pitch of pitches) {
+    if (pitch < lo) lo = pitch;
+    if (pitch > hi) hi = pitch;
+  }
+  return Number.isFinite(lo) && Number.isFinite(hi) ? { lo, hi } : null;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Colour                                                                      */
 /* -------------------------------------------------------------------------- */
@@ -445,6 +456,8 @@ export class Timeline {
       const right = Math.min(width, Math.max(x1, x0 + 2));
       const barWidth = Math.max(2, right - left);
 
+      this.#drawChordGroup(note, left, right, height, alpha);
+
       // Chord tones behind, thinner and dimmer than the primary.
       for (const pitch of note.pitches) {
         if (note.primary !== null && Math.abs(pitch - note.primary) < 0.001) continue;
@@ -479,6 +492,40 @@ export class Timeline {
   }
 
   /**
+   * A faint wash behind a chord's whole voicing.
+   *
+   * The chord-tone bars drawn just after this only share a time range —
+   * nothing ties them to each other visually, so a four-note chord reads as
+   * four coincidentally aligned bars rather than one thing. A background a
+   * little lighter than the ground, spanning the note's full pitch cluster,
+   * is what turns that into a single grouped object at a glance.
+   *
+   * Luminance only (`theme.highlight`, the same token the attack cap and bend
+   * origin use) — a new hue here would compete with the pitch-class colour
+   * every bar already carries. Kept faint enough to stay a grouping cue, not
+   * a second glowing layer.
+   */
+  #drawChordGroup(
+    note: TrackedNote,
+    left: number,
+    right: number,
+    height: number,
+    alpha: number
+  ): void {
+    if (note.kind !== "chord" || note.pitches.length < 2) return;
+    const extent = pitchExtent(note.pitches);
+    if (!extent) return;
+
+    const top = this.#yOf(extent.hi, height) - BAR_HEIGHT / 2 - 3;
+    const bottom = this.#yOf(extent.lo, height) + BAR_HEIGHT / 2 + 3;
+
+    const ctx = this.#ctx;
+    ctx.fillStyle = withAlpha(this.#theme.highlight, 0.07 * alpha);
+    cutRect(ctx, left, top, right - left, bottom - top, 4);
+    ctx.fill();
+  }
+
+  /**
    * A tick where a Note became a chord.
    *
    * Blooming is retroactive in the drawing: once `harmony` arrives, the whole
@@ -498,13 +545,8 @@ export class Timeline {
     const x = Math.round(this.#xOf(note.bloomedAtMs, now, width)) + 0.5;
     if (x < 0 || x > width) return;
 
-    let lo = Number.POSITIVE_INFINITY;
-    let hi = Number.NEGATIVE_INFINITY;
-    for (const pitch of note.pitches) {
-      if (pitch < lo) lo = pitch;
-      if (pitch > hi) hi = pitch;
-    }
-    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return;
+    const extent = pitchExtent(note.pitches);
+    if (!extent) return;
 
     const ctx = this.#ctx;
     ctx.save();
@@ -512,8 +554,8 @@ export class Timeline {
     ctx.strokeStyle = withAlpha(this.#theme.highlight, 0.65 * alpha);
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(x, this.#yOf(hi, height) - BAR_HEIGHT / 2 - 2);
-    ctx.lineTo(x, this.#yOf(lo, height) + BAR_HEIGHT / 2 + 2);
+    ctx.moveTo(x, this.#yOf(extent.hi, height) - BAR_HEIGHT / 2 - 2);
+    ctx.lineTo(x, this.#yOf(extent.lo, height) + BAR_HEIGHT / 2 + 2);
     ctx.stroke();
     ctx.restore();
   }

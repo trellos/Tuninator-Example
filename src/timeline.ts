@@ -22,7 +22,13 @@
 
 import type { DetectedPitch, Note, NoteLifecycle, SourceTimeMs } from "tuninator";
 
+import { clamp01, hzToMidi } from "./pitch.js";
 import { readTheme, withAlpha, type CanvasTheme } from "./theme.js";
+// `ui.ts` owns every piece of display copy -- STATE_COPY, ERROR_COPY,
+// CHANGE_COPY and this. A bar and a Note card must never disagree about what a
+// Note is called, least of all about rendering an abstention as "…", so there
+// is one definition and the canvas imports it rather than keeping a twin.
+import { labelOf } from "./ui.js";
 
 import type { BeatGrid } from "./metronome.js";
 
@@ -86,46 +92,19 @@ export type TimelineOptions = {
 /* Pitch extraction                                                            */
 /* -------------------------------------------------------------------------- */
 
-const PITCH_CLASS_SEMITONES: Record<string, number> = {
-  C: 0, "C#": 1, D: 2, "D#": 3, E: 4, F: 5,
-  "F#": 6, G: 7, "G#": 8, A: 9, "A#": 10, B: 11,
-};
-
-function hzToMidi(hz: number): number {
-  return 69 + 12 * Math.log2(hz / 440);
-}
-
-/** "A4", "F#3" -> fractional MIDI. Returns null for chord labels like "Am7". */
-function midiFromScientificName(name: string): number | null {
-  const match = /^([A-G])([#b]?)(-?\d+)$/.exec(name.trim());
-  if (!match) return null;
-  const [, letter, accidental, octave] = match;
-  if (letter === undefined || octave === undefined) return null;
-  let semitone = PITCH_CLASS_SEMITONES[letter];
-  if (semitone === undefined) return null;
-  if (accidental === "#") semitone += 1;
-  if (accidental === "b") semitone -= 1;
-  return (Number(octave) + 1) * 12 + semitone;
-}
-
 /**
- * `DetectedPitch` guarantees `midi`, but its `frequencyHz` and `centsOffset` are
- * optional, so the fractional position is taken from whatever is present in
- * order of precision rather than assumed.
+ * Where to draw a `DetectedPitch`, as fractional MIDI.
+ *
+ * `midi` is required in 0.2, so this always has an answer — no null case, and
+ * no name-parsing fallback. (0.1's `EventPitch` had every field optional, which
+ * is why this used to be a four-way guess.) `frequencyHz` is preferred when
+ * present because it carries the detuning the snapped `midi` has discarded.
  */
-function pitchOfDetected(pitch: DetectedPitch): number | null {
+function pitchOfDetected(pitch: DetectedPitch): number {
   if (typeof pitch.frequencyHz === "number" && pitch.frequencyHz > 0) {
     return hzToMidi(pitch.frequencyHz);
   }
-  if (Number.isFinite(pitch.midi)) return pitch.midi + (pitch.centsOffset ?? 0) / 100;
-  const fromName = midiFromScientificName(pitch.name);
-  return fromName === null ? null : fromName + (pitch.centsOffset ?? 0) / 100;
-}
-
-/** The label a bar carries. Mirrors `labelOf()` in ui.ts. */
-function labelOf(note: Note): string {
-  if (note.harmony) return note.harmony.chordName ?? "…";
-  return note.pitch.current?.name ?? "…";
+  return pitch.midi + (pitch.centsOffset ?? 0) / 100;
 }
 
 function extractPitches(note: Note): { pitches: number[]; primary: number | null } {
@@ -138,23 +117,18 @@ function extractPitches(note: Note): { pitches: number[]; primary: number | null
         ? pitchOfDetected(note.pitch.current)
         : null;
 
-  const others: number[] = [];
-  for (const pitch of note.harmony?.detectedPitches ?? []) {
-    const value = pitchOfDetected(pitch);
-    if (value !== null) others.push(value);
-  }
+  const others = (note.harmony?.detectedPitches ?? []).map(pitchOfDetected);
 
-  // Last resort: a single-note label like "A4" still tells us where to draw.
-  const fromLabel = midiFromScientificName(labelOf(note));
+  // A Note can be delivered before its pitch resolves; `origin` is frozen at
+  // the attack and is the only thing guaranteed to place it.
   const originPitch = note.origin.firstDetectedPitch
     ? pitchOfDetected(note.origin.firstDetectedPitch)
     : null;
 
-  const resolvedPrimary = primary ?? others[0] ?? fromLabel ?? originPitch;
-  const pitches =
-    others.length > 0 ? others : resolvedPrimary !== null && resolvedPrimary !== undefined ? [resolvedPrimary] : [];
+  const resolvedPrimary = primary ?? others[0] ?? originPitch;
+  const pitches = others.length > 0 ? others : resolvedPrimary !== null ? [resolvedPrimary] : [];
 
-  return { pitches, primary: resolvedPrimary ?? null };
+  return { pitches, primary: resolvedPrimary };
 }
 
 /** The vertical span of a pitch list, or null when there is nothing to span. */
@@ -681,10 +655,6 @@ export class Timeline {
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
 
-function clamp01(value: number): number {
-  return value < 0 ? 0 : value > 1 ? 1 : value;
-}
-
 /**
  * 45-degree chamfered rectangle — the canvas counterpart of the CSS corner
  * cuts, so bars and panels share one geometry language.
@@ -705,27 +675,5 @@ function cutRect(
   ctx.lineTo(x + width - c, y + height);
   ctx.lineTo(x, y + height);
   ctx.lineTo(x, y + c);
-  ctx.closePath();
-}
-
-function roundRect(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  radius: number
-): void {
-  const r = Math.min(radius, width / 2, height / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + width - r, y);
-  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
-  ctx.lineTo(x + width, y + height - r);
-  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
-  ctx.lineTo(x + r, y + height);
-  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
   ctx.closePath();
 }

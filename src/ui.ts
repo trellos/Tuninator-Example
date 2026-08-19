@@ -18,6 +18,8 @@ import type {
   Timebase,
 } from "tuninator";
 
+import { clamp } from "./pitch.js";
+
 import type { MetronomeStatus } from "./metronome.js";
 
 export type SourceChoice = "auto" | "mock" | "live";
@@ -120,10 +122,6 @@ function formatHz(hz: number): string {
   return hz >= 1000 ? hz.toFixed(0) : hz.toFixed(1);
 }
 
-function clamp(value: number, low: number, high: number): number {
-  return value < low ? low : value > high ? high : value;
-}
-
 /**
  * What to call a Note.
  *
@@ -174,7 +172,6 @@ export class Ui {
   /** Ids kept from the 0.1 markup: `must()` and the smoke suite both key on them. */
   #activeNotes: HTMLElement;
   #noteLog: HTMLElement;
-  #logCount = 0;
 
   #pendingFrame: PitchFrame | null = null;
   #pendingNotes: { notes: Note[]; sourceNowMs: SourceTimeMs } | null = null;
@@ -207,7 +204,6 @@ export class Ui {
     this.#levelFill = must("level-fill");
     this.#channelMeters = must("channel-meters");
     this.#channelNote = must("channel-note");
-    this.#channelMeters.parentElement?.classList.add("stacked");
     this.#timebaseValue = must("timebase-value");
 
     this.#activeNotes = must("active-events");
@@ -240,11 +236,10 @@ export class Ui {
     this.#statusMessage.textContent = message;
   }
 
-  setSource(choice: SourceChoice, effective: "mock" | "live", note?: string): void {
+  setSource(choice: SourceChoice, effective: "mock" | "live"): void {
     this.#sourceSelect.value = choice;
     this.#sourceBadge.textContent = effective === "mock" ? "mock input" : "live microphone";
     this.#sourceBadge.dataset["kind"] = effective;
-    this.#sourceBadge.title = note ?? "";
   }
 
   setMetronome(status: MetronomeStatus, bpm: number): void {
@@ -652,7 +647,6 @@ export class Ui {
 
     line.append(markerEl, labelEl, detailEl);
     this.#prependLine(line);
-    this.#logCount += 1;
   }
 
   #prependLine(line: HTMLElement): void {
@@ -664,11 +658,6 @@ export class Ui {
 
   clearLog(): void {
     this.#noteLog.replaceChildren();
-    this.#logCount = 0;
-  }
-
-  get loggedCount(): number {
-    return this.#logCount;
   }
 }
 

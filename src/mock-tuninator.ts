@@ -26,6 +26,8 @@
  */
 
 import { RecognizerError } from "tuninator";
+
+import { clamp01, hzToMidi, midiToHz, noteNameOf, octaveOf, pitchClassOf } from "./pitch.js";
 import type {
   DetectedPitch,
   Hypothesis,
@@ -51,37 +53,9 @@ import type {
 /* Note helpers (synthesis-side only -- the real library derives these itself)  */
 /* -------------------------------------------------------------------------- */
 
-const PITCH_CLASSES: readonly PitchClass[] = [
-  "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
-];
-
-const A4_MIDI = 69;
-const A4_HZ = 440;
-
-function midiToHz(midi: number): number {
-  return A4_HZ * Math.pow(2, (midi - A4_MIDI) / 12);
-}
-
-function hzToMidiFloat(hz: number): number {
-  return A4_MIDI + 12 * Math.log2(hz / A4_HZ);
-}
-
-function pitchClassOf(midi: number): PitchClass {
-  const index = ((Math.round(midi) % 12) + 12) % 12;
-  return PITCH_CLASSES[index] ?? "C";
-}
-
-function octaveOf(midi: number): number {
-  return Math.floor(Math.round(midi) / 12) - 1;
-}
-
-function noteNameOf(midi: number): string {
-  return `${pitchClassOf(midi)}${octaveOf(midi)}`;
-}
-
 /** Build the `PitchNote` the library would report for a detected frequency. */
 function nearestNote(frequencyHz: number): PitchNote {
-  const exact = hzToMidiFloat(frequencyHz);
+  const exact = hzToMidi(frequencyHz);
   const midi = Math.round(exact);
   let cents = (exact - midi) * 100;
   // Range is documented as (-50, +50].
@@ -331,8 +305,16 @@ class MockRecognizer implements Recognizer {
   #live = new Map<string, LiveNote>();
   /** Recently ended Notes, so `getNote(id)` can still answer for them. */
   #recent = new Map<string, Note>();
-  /** `iteration:beat` -> note id, so the looping score does not restart Notes. */
-  #instanceKeys = new Map<string, string>();
+  /**
+   * Score slots already started, keyed by loop iteration.
+   *
+   * The lookback below consults only the current iteration and the one before
+   * it, so anything older can never be read again and is dropped. Keyed by
+   * iteration rather than by a flat `iteration:beat` string precisely so that
+   * dropping a whole stale iteration is one delete instead of a scan -- the
+   * flat map had no expiry at all and grew for as long as the mock ran.
+   */
+  #startedSlots = new Map<number, Set<number>>();
 
   constructor(options: MockRecognizerOptions = {}) {
     this.#options = options;
@@ -385,7 +367,7 @@ class MockRecognizer implements Recognizer {
     }
     for (const live of [...this.#live.values()]) this.#endNote(live, this.#cursorMs);
     this.#live.clear();
-    this.#instanceKeys.clear();
+    this.#startedSlots.clear();
     this.#timebase = null;
     this.#emit("status", "mock: stopped");
     this.#setState("idle");
@@ -489,36 +471,35 @@ class MockRecognizer implements Recognizer {
       if (t >= live.endsAt) this.#endNote(live, live.endsAt);
     }
 
-    // Start anything whose window has opened. The score is scanned from two
-    // iterations back so a Note that rings past the loop boundary is not
+    for (const past of this.#startedSlots.keys()) {
+      if (past < iteration - 1) this.#startedSlots.delete(past);
+    }
+
+    // Start anything whose window has opened. The score is scanned one
+    // iteration back too, so a Note that rings past the loop boundary is not
     // restarted by its own next instance.
     for (const start of [iteration - 1, iteration]) {
       if (start < 0) continue;
+      let started = this.#startedSlots.get(start);
       for (const entry of SCORE) {
         const startTime = start * LOOP_MS + entry.beat * BEAT_MS;
         const endsAt = startTime + entry.beats * BEAT_MS;
         if (t < startTime || t >= endsAt) continue;
-
-        const key = `${start}:${entry.beat}`;
-        if (this.#hasInstance(key)) continue;
+        if (started?.has(entry.beat)) continue;
 
         const live = this.#beginNote(entry, startTime, endsAt);
         this.#live.set(live.id, live);
-        this.#instanceKeys.set(key, live.id);
+        if (!started) {
+          started = new Set();
+          this.#startedSlots.set(start, started);
+        }
+        started.add(entry.beat);
         this.#emit("noteStarted", this.#snapshot(live));
       }
     }
 
     // Then improve whatever is still sounding.
     for (const live of this.#live.values()) this.#advance(live, t);
-  }
-
-  #hasInstance(key: string): boolean {
-    const id = this.#instanceKeys.get(key);
-    if (id === undefined) return false;
-    if (this.#live.has(id)) return true;
-    this.#instanceKeys.delete(key);
-    return false;
   }
 
   /* ---- one Note's life ---- */
@@ -940,10 +921,6 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function clamp01(value: number): number {
-  return value < 0 ? 0 : value > 1 ? 1 : value;
-}
-
 /** Deterministic pseudo-noise in [-amount, +amount], driven by time. */
 function jitter(seed: number, amount: number): number {
   const x = Math.sin(seed * 0.017 + 1.3) * 43758.5453;
@@ -966,6 +943,3 @@ function envelopeAt(progress: number): number {
 export function createMockRecognizer(options: MockRecognizerOptions = {}): Recognizer {
   return new MockRecognizer(options);
 }
-
-/** Exposed so the UI can label the timeline's beat grid consistently. */
-export const MOCK_BPM = BPM;

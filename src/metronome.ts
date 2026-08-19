@@ -104,10 +104,6 @@ export class Metronome {
     this.#ownsContext = false;
   }
 
-  getAudioContext(): AudioContext | null {
-    return this.#context;
-  }
-
   /** The beat grid, in `performance.now()` ms. Always valid, running or not. */
   getGrid(): BeatGrid {
     return {

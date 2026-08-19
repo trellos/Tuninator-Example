@@ -175,8 +175,6 @@ function readChannelPanel(page) {
     const rows = [...document.querySelectorAll("#channel-meters .channel-row")];
     return {
       count: rows.length,
-      silent: rows.map((row) => row.getAttribute("data-silent")),
-      selected: rows.map((row) => row.getAttribute("data-selected")),
       note: document.getElementById("channel-note")?.textContent ?? "",
     };
   });
@@ -228,44 +226,25 @@ async function runStereoChannelCheck(page) {
   );
 
   // `PitchFrame.channelRms` / `.selectedChannel` are optional, and 0.2's browser
-  // adapter does not populate either: the capture worklet measures them and
+  // adapter populates neither: the capture worklet measures them and
   // `BrowserRecognizer` drops them on the way to the engine. So which channel
-  // was selected can no longer be asserted from here -- the check above, that
-  // the tone is detected at all, is what still proves selection happened.
-  // Reported rather than checked, because a demo cannot fix a library.
+  // was selected cannot be asserted from here -- the check above, that the tone
+  // is detected at all, is what still proves selection happened.
+  //
+  // Reported rather than checked, because a demo cannot fix a library. The
+  // demo's job is to say so rather than draw an empty meter, and that IS
+  // checked. If a later revision starts forwarding the fields, the mock-path
+  // check already covers rendering them.
   const channels = await readChannelPanel(page);
-  if (probe?.channelRms === undefined) {
-    note(
-      "stereo: per-channel diagnostics are not reported by this library revision",
-      `channelRms=${JSON.stringify(probe?.channelRms)} ` +
-        `selectedChannel=${JSON.stringify(probe?.selectedChannel)} ` +
-        `panel="${channels.note}"`
-    );
-    check(
-      "stereo: the demo says so rather than drawing an empty meter",
-      channels.count === 0 && channels.note.includes("not reported"),
-      `${channels.count} rows, note="${channels.note}"`
-    );
-    return;
-  }
-
-  // The diagnostic half, for a library revision that does report them: the demo
-  // has to make "channel 0 is dead" visible, because that is the difference
-  // between a wiring mistake and a broken app.
-  check(
-    "stereo: the demo shows both input channels",
-    channels.count === 2,
-    `${channels.count} rows`
+  note(
+    "stereo: per-channel diagnostics are not reported by this library revision",
+    `channelRms=${JSON.stringify(probe?.channelRms)} ` +
+      `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`
   );
   check(
-    "stereo: the demo marks the silent channel as silent",
-    channels.silent[0] === "yes" && channels.silent[1] === "no",
-    `ch0=${channels.silent[0]} ch1=${channels.silent[1]} note="${channels.note}"`
-  );
-  check(
-    "stereo: the demo shows which channel is being listened to",
-    channels.selected[1] === "yes" && channels.note.includes("ch1"),
-    `selected=[${channels.selected}] note="${channels.note}"`
+    "stereo: the demo says the channels are unreported rather than drawing an empty meter",
+    channels.count === 0 && channels.note.includes("not reported"),
+    `${channels.count} rows, note="${channels.note}"`
   );
 }
 
@@ -318,16 +297,10 @@ async function runCombFilterCheck(page) {
   // does not deliver it (see runStereoChannelCheck). The two results differing
   // is what proves `auto` is not summing.
   const probe = await page.evaluate(() => window.__tuninatorDemo ?? null);
-  if (probe?.selectedChannel === undefined) {
-    note("comb: the library did not name the channel it settled on",
-      `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`);
-  } else {
-    check(
-      "comb: selection picks a single channel instead of summing",
-      typeof probe.selectedChannel === "number",
-      `selectedChannel=${JSON.stringify(probe.selectedChannel)}`
-    );
-  }
+  note(
+    "comb: the library did not name the channel it settled on",
+    `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`
+  );
 }
 
 async function main() {

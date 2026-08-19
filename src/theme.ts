@@ -28,9 +28,8 @@ export type CanvasTheme = {
   /** Backing plate behind note labels, and the label text itself. */
   plate: string;
   plateText: string;
-  /** Font stack, so the canvas uses the same faces as the DOM. */
+  /** Font stack, so the canvas uses the same face as the DOM. */
   fontMono: string;
-  fontDisplay: string;
   /** Pitch-class hue ramp, constrained to the palette's arc. */
   hueBase: number;
   hueSpan: number;
@@ -55,7 +54,6 @@ const FALLBACK: CanvasTheme = {
   plate: "rgba(0, 0, 0, 0.62)",
   plateText: "rgba(230, 230, 230, 1)",
   fontMono: '"Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
-  fontDisplay: '"VT323", "Share Tech Mono", ui-monospace, monospace',
   hueBase: 176,
   hueSpan: 156,
   sat: 96,
@@ -82,7 +80,6 @@ export function readTheme(el: Element = document.documentElement): CanvasTheme {
     plate: str("--canvas-plate", FALLBACK.plate),
     plateText: str("--canvas-plate-text", FALLBACK.plateText),
     fontMono: str("--font-mono", FALLBACK.fontMono),
-    fontDisplay: str("--font-display", FALLBACK.fontDisplay),
     hueBase: num("--canvas-hue-base", FALLBACK.hueBase),
     hueSpan: num("--canvas-hue-span", FALLBACK.hueSpan),
     sat: num("--canvas-sat", FALLBACK.sat),

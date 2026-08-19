@@ -218,9 +218,9 @@ into internals; each is handled defensively in the demo instead.
    library is bundled from source — Vite warns about exactly this at build time. The demo always
    passes an explicit `workletUrl`, so it is unaffected.
 
-4. **No exported frequency↔note helper.** The timeline carries its own small copy for turning a
-   `DetectedPitch` into a vertical position. `PitchFrame.nearest` covers the tuner readout, so this
-   only matters for rendering Notes.
+4. **No exported frequency↔note helper.** `src/pitch.ts` carries the demo's own, shared by the
+   timeline (placing a `DetectedPitch` vertically) and the mock (synthesising one).
+   `PitchFrame.nearest` covers the tuner readout, so this only matters for rendering Notes.
 
 ### Fixed by 0.2
 

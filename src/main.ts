@@ -158,19 +158,6 @@ function toRecognizerError(cause: unknown): RecognizerError {
     }
   }
 
-  // A thrown object carrying a known code but not extending Error — the shape
-  // 0.1 used. Preserved so a mixed checkout still reports something useful.
-  if (typeof cause === "object" && cause !== null) {
-    const candidate = cause as { code?: unknown; message?: unknown };
-    if (typeof candidate.code === "string" && ERROR_CODES.has(candidate.code)) {
-      return new RecognizerError(
-        candidate.code as RecognizerErrorCode,
-        typeof candidate.message === "string" ? candidate.message : candidate.code,
-        cause
-      );
-    }
-  }
-
   if (cause instanceof Error) {
     return new RecognizerError("unknown", cause.message || String(cause), cause);
   }
@@ -410,46 +397,29 @@ class App {
   }
 
   /**
-   * `auto` prefers the real library and falls back to the mock if it cannot be
-   * constructed at all. `createRecognizer` does no work until `start()`, so in
-   * practice this only catches a genuinely broken checkout — but the fallback
-   * is what keeps the deployed demo usable when the library changes under it.
+   * `auto` and `live` both build the real library; only `mock` does not.
+   *
+   * There is no construction-failure fallback because there is no construction
+   * failure to catch: `createRecognizer` allocates and returns, doing no work
+   * until `start()`. Everything that can actually go wrong -- no microphone, a
+   * missing worklet, a denied permission -- surfaces from `start()`, and the
+   * error banner already handles all of it.
    */
   #build(choice: SourceChoice): void {
     this.#teardown();
 
-    let instance: Recognizer | null = null;
-    let note: string | undefined;
-
-    if (choice !== "mock") {
-      try {
-        instance = createRecognizer(this.#baseOptions());
-        this.#effectiveSource = "live";
-      } catch (cause) {
-        const error = toRecognizerError(cause);
-        if (choice === "live") {
-          this.#ui.setError(error);
-          this.#ui.logNote(`live source unavailable: ${error.message}`);
-        } else {
-          note = `The real library could not be constructed (${error.message}); using the mock.`;
-          this.#ui.logNote(note);
-          this.#ui.setStatus(note);
-        }
-        instance = null;
-      }
-    }
-
-    if (!instance) {
-      instance = createMockRecognizer({
-        ...this.#baseOptions(),
-        ...(this.#settings.failWith ? { failWith: this.#settings.failWith } : {}),
-      });
-      this.#effectiveSource = "mock";
-    }
+    const instance =
+      choice === "mock"
+        ? createMockRecognizer({
+            ...this.#baseOptions(),
+            ...(this.#settings.failWith ? { failWith: this.#settings.failWith } : {}),
+          })
+        : createRecognizer(this.#baseOptions());
+    this.#effectiveSource = choice === "mock" ? "mock" : "live";
 
     this.#recognizer = instance;
     this.#probe.source = this.#effectiveSource;
-    this.#ui.setSource(choice, this.#effectiveSource, note);
+    this.#ui.setSource(choice, this.#effectiveSource);
     this.#ui.setState(instance.getState());
     this.#timeline.setHint(
       this.#effectiveSource === "mock"
@@ -688,10 +658,14 @@ class App {
   #installUnloadHandler(): void {
     window.addEventListener("pagehide", (event) => {
       void this.#recognizer?.dispose().catch(() => {});
+      // `persisted` means bfcache, where the document may come back -- so stop
+      // at releasing the microphone and leave this page's own resources up.
+      if (event.persisted) return;
+      this.#timeline.dispose();
+      this.#metronome.dispose();
       // The recognizer never closes a context it did not create, so the page
-      // closes its own -- but only when the page is really going away.
-      // `persisted` means bfcache, where the document may come back.
-      if (!event.persisted) void this.#audioContext?.close().catch(() => {});
+      // closes its own.
+      void this.#audioContext?.close().catch(() => {});
     });
   }
 }

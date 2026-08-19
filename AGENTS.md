@@ -84,6 +84,7 @@ Recognizer (real or MockRecognizer)
 | `src/ui.ts` | `Ui`: imperative DOM controller. Owns `STATE_COPY` / `ERROR_COPY` / `CHANGE_COPY` and `labelOf()`. |
 | `src/timeline.ts` | `Timeline`: the scrolling canvas. Its own rAF loop. |
 | `src/theme.ts` | `readTheme()` — bridges CSS custom properties into the canvas. |
+| `src/pitch.ts` | Frequency↔MIDI↔name maths and `clamp`, shared by the timeline and the mock. The library exports no such helper. |
 | `src/metronome.ts` | Lookahead Web Audio scheduler. No DOM. |
 | `src/mock-tuninator.ts` | Deterministic synthetic `Recognizer`. No DOM. Filename kept; the export is `createMockRecognizer`. |
 | `src/styles.css` | The only stylesheet. |
@@ -279,5 +280,6 @@ Consequences to keep in mind:
 - The channel-meter rendering is asserted on the **mock** run instead, which still supplies the
   fields.
 
-If a later library revision starts forwarding them, both `check()` branches are still in
-`runStereoChannelCheck` behind an `if` and will start running on their own.
+There is deliberately no dormant `else` branch waiting for the library to start forwarding them.
+If it does, the mock-path check already covers rendering, and the live-path assertions belong in the
+same commit that proves the fields arrive.

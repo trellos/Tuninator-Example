@@ -492,18 +492,20 @@ export class Timeline {
   }
 
   /**
-   * A faint wash behind a chord's whole voicing.
+   * A background panel behind a chord's whole voicing.
    *
    * The chord-tone bars drawn just after this only share a time range —
    * nothing ties them to each other visually, so a four-note chord reads as
-   * four coincidentally aligned bars rather than one thing. A background a
-   * little lighter than the ground, spanning the note's full pitch cluster,
-   * is what turns that into a single grouped object at a glance.
+   * four coincidentally aligned bars rather than one thing. A panel spanning
+   * the note's full pitch cluster, drawn first so every bar layers on top of
+   * it, is what turns that into a single grouped object at a glance.
    *
-   * Luminance only (`theme.highlight`, the same token the attack cap and bend
-   * origin use) — a new hue here would compete with the pitch-class colour
-   * every bar already carries. Kept faint enough to stay a grouping cue, not
-   * a second glowing layer.
+   * A fill alone read as barely-there noise against pure black, so this
+   * carries most of its contrast in the outline: a stroked edge is legible at
+   * a much lower opacity than a flat tint needs to be, because it is a sharp
+   * boundary rather than a gradual one. Luminance only (`theme.highlight`,
+   * the same token the attack cap and bend origin use) for both — a new hue
+   * here would compete with the pitch-class colour every bar already carries.
    */
   #drawChordGroup(
     note: TrackedNote,
@@ -520,9 +522,12 @@ export class Timeline {
     const bottom = this.#yOf(extent.lo, height) + BAR_HEIGHT / 2 + 3;
 
     const ctx = this.#ctx;
-    ctx.fillStyle = withAlpha(this.#theme.highlight, 0.07 * alpha);
     cutRect(ctx, left, top, right - left, bottom - top, 4);
+    ctx.fillStyle = withAlpha(this.#theme.highlight, 0.2 * alpha);
     ctx.fill();
+    ctx.strokeStyle = withAlpha(this.#theme.highlight, 0.5 * alpha);
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
 
   /**

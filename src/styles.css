@@ -249,7 +249,7 @@ body {
 }
 
 .pill[data-state="starting"],
-.pill[data-state="waiting-for-user-gesture"] {
+.pill[data-state="stopping"] {
   color: var(--near);
   border-color: color-mix(in srgb, var(--near) 50%, transparent);
   background: color-mix(in srgb, var(--near) 14%, transparent);
@@ -621,12 +621,10 @@ body {
   background: var(--bg-sunken);
 }
 
+/* A Note is only a chord once its harmony has bloomed, so this edge changing
+   colour mid-Note is the bloom, not a re-render glitch. */
 .event-card[data-kind="chord"] {
   border-left-color: var(--violet);
-}
-
-.event-card[data-kind="unknown"] {
-  border-left-color: var(--text-muted);
 }
 
 .event-card-head {
@@ -655,22 +653,23 @@ body {
   opacity: 0.65;
 }
 
-.chip[data-state="attack"] {
+/* `NoteLifecycle`, not an amplitude envelope: how settled the ANSWER is.
+   started -> enriching -> resolved -> ended. */
+.chip[data-state="started"] {
   color: var(--accent-warm);
   border-color: color-mix(in srgb, var(--accent-warm) 45%, transparent);
 }
 
-.chip[data-state="sustain"] {
-  color: var(--good);
-  border-color: color-mix(in srgb, var(--good) 45%, transparent);
-}
-
-.chip[data-state="bend"] {
+.chip[data-state="enriching"] {
   color: var(--violet);
   border-color: var(--violet-dim);
 }
 
-.chip[data-state="release"],
+.chip[data-state="resolved"] {
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good) 45%, transparent);
+}
+
 .chip[data-state="ended"] {
   color: var(--text-muted);
 }
@@ -701,6 +700,15 @@ body {
   color: var(--text-muted);
 }
 
+/* `hypotheses.trail` -- what was considered and dropped. Dimmer than the live
+   alternatives above it: it is history, not a competing answer. */
+.event-alt.trail {
+  margin-top: 2px;
+  opacity: 0.7;
+  text-decoration-line: line-through;
+  text-decoration-color: color-mix(in srgb, var(--text-muted) 45%, transparent);
+}
+
 /* ---------- log ---------- */
 
 .event-log {
@@ -723,6 +731,17 @@ body {
 
 .log-line[data-phase="start"] .log-marker {
   color: var(--good);
+}
+
+/* A revision to a Note already announced -- a bloom, or an outright
+   correction. Distinct from a start, because it is the recognizer changing its
+   mind in public. */
+.log-line[data-phase="change"] .log-marker {
+  color: var(--violet);
+}
+
+.log-line[data-phase="resolved"] .log-marker {
+  color: var(--accent);
 }
 
 .log-line[data-phase="end"] .log-marker {

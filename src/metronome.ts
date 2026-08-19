@@ -92,10 +92,10 @@ export class Metronome {
    * Adopt an externally owned `AudioContext` so metronome time and analysis
    * time share one clock.
    *
-   * NOTE: as of `types.ts` the library exposes no way to pass an AudioContext in
-   * (`TuninatorOptions` has no `audioContext` field) and no way to read the one
-   * it created (`Tuninator` has no getter), so in practice the metronome always
-   * ends up creating its own. This hook is here for the day the API allows it.
+   * Live since Tuninator 0.2: `RecognizerOptions.audioContext` lets the page
+   * hand the library its own context, and the library never closes one it did
+   * not create. `main.ts` makes one context and gives it to both, which is what
+   * makes `getTimebase().originContextTime` mean anything against the beat grid.
    */
   useContext(context: AudioContext): void {
     if (this.#context === context) return;

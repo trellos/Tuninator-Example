@@ -2,12 +2,18 @@
 
 A Vite browser demo for the [`tuninator`](https://github.com/trellos/Tuninator) guitar-analysis
 library: a scrolling note timeline, a 90 bpm metronome, and a live tuner readout driven by the
-library's `pitchFrame` and `MusicEvent` streams.
+library's `Note` stream and its opt-in `pitchFrame` diagnostic.
 
 ![The demo running against the mock source](./screenshot.png)
 
-Everything here goes through `tuninator`'s **public API only** — `createTuninator()` plus the types
-exported from the package entry point. Nothing reaches into `tuninator/src/**` internals.
+Everything here goes through `tuninator`'s **public API only** — `createRecognizer()` and
+`RecognizerError` plus the types exported from the package entry point. Nothing reaches into
+`tuninator/src/**` internals.
+
+> **Targets Tuninator 0.2.** The library was rewritten from a pitch detector into a streaming
+> musical event recognizer: `MusicEvent` became `Note`, the four modes were deleted, and a Note now
+> *blooms* into a chord when the evidence supports it rather than being born one. See
+> [Migrating to 0.2](#migrating-to-02) for what changed here.
 
 ---
 
@@ -26,6 +32,18 @@ parent/
 └── Tuninator-Example/  # this repo
 ```
 
+**The library must be on a revision that has the 0.2 recognizer API.** At time of writing that is
+its `claude/guitar-event-recognizer-refactor-t5g5yr` branch — the library's `main` is still 0.1, and
+this demo does not compile against it:
+
+```bash
+git clone https://github.com/trellos/Tuninator ../Tuninator
+cd ../Tuninator
+git checkout claude/guitar-event-recognizer-refactor-t5g5yr
+npm install && npm run build        # emits dist/tuninator-worklet.js
+cd ../Tuninator-Example && npm install
+```
+
 | script | what it does |
 | --- | --- |
 | `npm run dev` | Vite dev server with HMR, including changes to the library's source |
@@ -42,14 +60,14 @@ parent/
 | *(none)* | **auto** — use the real library, falling back to the mock if it cannot be constructed |
 | `?mock=1` | force the synthetic source (no microphone, no permission prompt) |
 | `?mock=0` | force the real library |
-| `?mode=lead\|chords\|rhythm\|raw` | initial `TuninatorMode` |
 | `?workletUrl=/nope.js` | point the library at a missing worklet, to exercise `worklet-load-failed` |
-| `?failWith=<TuninatorErrorCode>` | make the mock's `start()` fail with that code, to exercise the error UI |
+| `?failWith=<RecognizerErrorCode>` | make the mock's `start()` reject with that code, to exercise the error UI |
 | `?channels=auto\|sum\|<index>` | `input.channels` — which input channel(s) the library analyses. `auto` (the default) selects the loudest; `sum` is the only way to *see* a mic and a DI of one guitar comb-filter into an octave error |
 | `?metronome=1` | start the metronome on load |
 | `?autostart=1` | start listening on load |
 
-Source and mode are also switchable from the toolbar at runtime.
+Source is switchable from the toolbar at runtime. **There is no mode selector**: 0.2 deleted modes
+outright, and the recognizer decides.
 
 ---
 
@@ -105,16 +123,19 @@ A canvas, redrawn on `requestAnimationFrame`.
 - **Window**: 16 beats of history. At 90 bpm that is `16 × 666.67ms = 10.667s` on screen.
 - **Geometry**: `x(t) = width × (1 − (now − t) / windowMs)`. New material enters at the **right**
   edge and the field scrolls **left**.
-- **Bar length is event duration.** An event that has not ended yet (`endedAt === null`) is drawn out
+- **Bar length is Note duration.** A Note that has not ended yet (`endTime === null`) is drawn out
   to the right edge and grows as it is held.
+- **Notes can overlap**, so bars are keyed by `note.id` and several may share a column — a restrum
+  over a still-ringing chord is two bars, not one replacing the other.
 - **Beat gridlines come from the metronome's own clock**, so a note played on the click sits on a
   gridline. Bar lines (every 4 beats) are brighter and numbered.
 - **Pitch is the vertical axis**, with hue per pitch class and lightness rising with octave; the
   range eases to fit whatever is on screen. Octave guides are labelled `C3`, `C4`, …
-- **Bars are labelled** with `label.name`, and **dimmed in proportion to `confidence`** rather than
-  hidden.
-- **Bends stay one event.** `bend.centsFromStart` is sampled into a short per-event trace and drawn
-  as a ribbon curving away from a dashed line at the origin pitch.
+- **Bars are labelled** `harmony.chordName ?? pitch.current.name`, and **dimmed in proportion to
+  `confidence`** rather than hidden. A chord the recognizer will not name renders as `…`.
+- **Bends stay one Note.** The ribbon follows `pitch.contour` when the library supplies it
+  (`diagnostics: { contour: true }`) and falls back to sampling `bend.amountCents` per change,
+  curving away from a dashed line at the origin pitch.
 - `devicePixelRatio` is honoured, so nothing is blurry on a HiDPI display.
 
 ### Metronome (`src/metronome.ts`)
@@ -130,69 +151,125 @@ rAF is used only for drawing.
 ### Panels (`src/ui.ts`)
 
 Start/stop, `state` + `status` + `error`, live frequency and confidence, nearest note with cents and
-a needle, the active `MusicEvent` (including chord tones, alternatives and bend excursion), and a
-scrolling log of event starts and ends. The mode selector calls `setMode()` and works while
-listening, as the API documents.
+a needle, the timebase from `getTimebase()`, one card per active `Note`, and a scrolling log.
+
+Each Note card shows its `lifecycle` (`started` → `enriching` → `resolved` → `ended`), its revision
+number, its chord tones, and both halves of `hypotheses`: what is still being entertained (`also:`)
+and **what was considered and ruled out** (`ruled out:`, struck through). The trail is the most
+visible new capability in 0.2 — it is what to show a player who disagrees with the answer.
+
+The log distinguishes the four deliveries rather than flattening them: a start, a *revision* (a
+bloom or an outright correction, which carries `change.previous`), the moment the answer settled,
+and the end.
 
 ### Error handling
 
-Every `TuninatorErrorCode` — `mic-unavailable`, `mic-permission-denied`, `audio-context-failed`,
-`worklet-unavailable`, `worklet-load-failed`, `unknown` — has a titled, human-readable explanation
-in the error banner. Nothing is left to a bare console throw: `start()` rejections, `error` events,
-`window.onerror` and unhandled rejections all funnel into the same banner, and anything that is not
-already a `TuninatorError` is normalised into one.
+Every `RecognizerErrorCode` — `mic-unavailable`, `mic-permission-denied`, `audio-context-failed`,
+`worklet-unavailable`, `worklet-load-failed`, `engine-load-failed`, `already-disposed`, `unknown` —
+has a titled, human-readable explanation in the error banner. Nothing is left to a bare console
+throw: `start()` rejections, `error` events, `window.onerror` and unhandled rejections all funnel
+into the same banner, and anything that is not already a `RecognizerError` is normalised into one.
 
 Try `?failWith=mic-permission-denied` (mock) or `?workletUrl=/nope.js` (real library).
 
 ### Mock source (`src/mock-tuninator.ts`)
 
-A synthetic `Tuninator` that plays a fixed 16-beat phrase at 90 bpm — a lick, a bent B4, and three
-chords (Em, Cmaj, G) — emitting the same `pitchFrame` and `musicEvent*` streams as the real library,
+A synthetic `Recognizer` that plays a fixed 16-beat phrase at 90 bpm — a lick, a bent B4, and three
+chords (Em, C, and one it declines to name) — emitting the same `noteStarted` → `noteChanged` →
+`noteResolved` → `noteEnded` sequence as the real library, plus the opt-in `pitchFrame` diagnostic
 including silence frames with `frequencyHz: null` between notes.
 
-It was written so the whole UI could be built and verified before the detector existed, and it stays
-useful afterwards as a deterministic UI test harness that needs no microphone, no permission prompt
-and no audio hardware. `npm run smoke` drives it.
+It is a real implementation, not a stub, and it deliberately covers the paths the demo would
+otherwise never exercise: a Note that **blooms** into a chord part-way through, one the recognizer
+gets **wrong first** and corrects with `change.previous`, a chord it identifies but **will not
+name**, a **bend**, **overlapping** Notes, and non-empty `hypotheses.active`/`.trail` so the
+alternatives UI always has data.
+
+That makes it a deterministic UI test harness needing no microphone, no permission prompt and no
+audio hardware. `npm run smoke` drives it.
 
 ---
 
 ## Notes on the public API
 
-Places where `types.ts` did not quite cover what the demo needed. None were worked around by
-reaching into internals; each is handled defensively in the demo instead.
+Places where `types.ts` does not quite cover what the demo needs. None are worked around by reaching
+into internals; each is handled defensively in the demo instead.
 
-1. **No way to share an `AudioContext`.** `TuninatorOptions` has no `audioContext` field and
-   `Tuninator` has no getter for the one it creates. The metronome therefore runs its own context,
-   and metronome time cannot be aligned to analysis time through the audio clock.
-   `Metronome.useContext()` exists for the day the API allows it.
+1. **`PitchFrame.channelRms` and `.selectedChannel` are never populated.** The capture worklet
+   measures both and puts them on every `CaptureChunk`, but the browser adapter forwards only
+   `samples` and `startSample` to the engine, so nothing downstream ever sees them. Both fields are
+   optional, so this is a gap rather than a contract violation — but it means the live path cannot
+   show which input channel is being analysed, which is the one thing that distinguishes "the guitar
+   is in input 2 and the browser only captured channel 1" from "the detector is broken". The demo's
+   per-channel meters therefore say *"not reported by this source"* on the live path rather than
+   drawing an empty meter, and `scripts/smoke.mjs` reports it as a `NOTE` instead of turning the
+   assertion vacuous. Fixing it needs a change in the library, not here.
 
-2. **`PitchFrame.timestamp` has no documented epoch.** It is specified as "monotonic" and comparable
-   with `MusicEvent` timestamps, but not as sharing an origin with `performance.now()`. A scrolling
-   timeline needs `now` in the same clock, so `src/main.ts` estimates the offset between the two
-   clocks (`Timebase`) instead of assuming they match.
+2. **`host: "worker"` throws.** `RecognizerOptions.host` accepts it and `createWorkerHost()` rejects
+   it with `engine-load-failed` — deliberately, and the error says so. The demo uses the default
+   inline host and carries banner copy for the code anyway.
 
-3. **`start()`'s rejection type is unspecified.** It is typed `Promise<void>`, so whether it rejects
-   with a `TuninatorError`, a `DOMException` from `getUserMedia`, or nothing at all (errors arriving
-   only via the `error` event) is not part of the contract. The demo handles all three and normalises
-   whatever it gets.
-
-4. **`TuninatorError` is a plain object, not an `Error`.** It has no stack and fails `instanceof`, so
-   consumers need a structural type guard to tell it apart from other throwables.
-
-5. **Every field of `EventPitch` is optional except `role` and `confidence`.** A consumer cannot rely
-   on getting *any* pitch information from an event, which is a problem for a view that must place a
-   note vertically. The timeline tries `midi`, then `frequencyHz`, then parsing `name`, then parsing
-   `label.name`, and skips the bar if all four are absent.
-
-6. **The library's default `workletUrl` does not survive bundling.** It resolves
+3. **The library's default `workletUrl` does not survive bundling.** It resolves
    `new URL("./tuninator-worklet.js", import.meta.url)`, which is correct when consuming the
    unbundled `dist/index.js` but points at a non-existent sibling of the output chunk when the
    library is bundled from source — Vite warns about exactly this at build time. The demo always
    passes an explicit `workletUrl`, so it is unaffected.
 
-7. **No `dispose()`.** `stop()` returns to `idle`, but there is no documented way to release the
-   `AudioContext` and microphone permanently, which the source switcher would use.
+4. **No exported frequency↔note helper.** The timeline carries its own small copy for turning a
+   `DetectedPitch` into a vertical position. `PitchFrame.nearest` covers the tuner readout, so this
+   only matters for rendering Notes.
 
-Minor: there is no exported frequency↔note helper, so the timeline carries its own small copy for
-turning an `EventPitch` into a vertical position. `PitchFrame.nearest` covers the tuner readout, so
-this only matters for event rendering.
+### Fixed by 0.2
+
+Five of this list's seven 0.1 entries are gone, which is most of why the migration was worth doing:
+
+| was | now |
+| --- | --- |
+| no way to share an `AudioContext` | `RecognizerOptions.audioContext`, never closed by the library. The demo passes one context to both the metronome and the recognizer |
+| `PitchFrame.timestamp` had no documented epoch | `SourceTimeMs`, epoch 0, plus `getTimebase()` — so the timeline is *anchored* to the audio clock instead of estimating the offset |
+| `start()`'s rejection type unspecified | documented as `RecognizerError`, and nothing else |
+| `TuninatorError` was a plain object | `RecognizerError extends Error`: throwable, `instanceof`-able, carries a stack |
+| every field of `EventPitch` optional but `role`/`confidence` | `DetectedPitch` requires `midi`, `name`, `pitchClass` and `octave` |
+| no `dispose()` | `dispose()` releases the microphone and worklet; the demo calls it on `pagehide` and when switching source |
+
+---
+
+## Migrating to 0.2
+
+What changed in this repo, for anyone holding a 0.1 integration of their own. The library's own
+`docs/MIGRATION.md` is the full old→new reference.
+
+| 0.1 | 0.2 |
+| --- | --- |
+| `createTuninator()` / `Tuninator` | `createRecognizer()` / `Recognizer` |
+| `MusicEvent` | `Note` |
+| `musicEventStart` / `Update` / `End` | `noteStarted` / `noteChanged(note, change)` / `noteEnded` |
+| — | `noteResolved` — fires once, when the answer settles |
+| `event.kind === "chord"` | `note.harmony !== undefined` |
+| `event.label.name` | `note.harmony?.chordName ?? note.pitch.current?.name` |
+| `event.state` (`attack`…`ended`) | `note.lifecycle` + `change.type` |
+| `event.ambiguity.alternatives` | `note.hypotheses.active` and `.trail` |
+| `event.bend.isActive` | `note.bend?.active` — `note.bend` is **absent** when there is no bend |
+| `event.updatedAt` | gone; use `note.revision.revisionNumber` |
+| `setMode()` / `TuninatorMode` | deleted. There are no modes |
+| `getActiveEvents()` (0 or 1) | `getActiveNotes()` — genuinely plural |
+| `stop(): void` | `await stop()`, which flushes |
+| `options.analysis` / `.tracking` | `options.engine` |
+| `pitchFrame` always on | opt-in via `diagnostics.pitchFrames` |
+
+Three of those bite quietly rather than loudly, and each is handled in a named place here:
+
+1. **The timestamp epoch moved.** 0.1 stamped everything with `AudioContext.currentTime * 1000`, so
+   a context alive for 90s gave a first event at ~90000. 0.2 uses `SourceTimeMs` — audio since the
+   first processed sample — so the first Note starts near 0, **and it restarts at 0 on every
+   `start()`**. `WallClock` in `src/main.ts` owns the conversion and is reset on every transition to
+   `starting`; without that reset its running minimum would place the whole timeline in the past
+   after the first stop.
+
+2. **Notes overlap.** Anything keyed on "the current event" has to be keyed on `note.id`. The
+   timeline and the active-Notes panel both are, and the mock plays a chord that rings through the
+   note after it so the case is exercised rather than assumed.
+
+3. **`harmony` present with `chordName` undefined is honest abstention** — the recognizer knows it
+   is a chord and will not name it. That renders as `…`, never as a guess. `labelOf()` in
+   `src/ui.ts` is the single place that decides.

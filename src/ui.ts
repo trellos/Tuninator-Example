@@ -1,18 +1,21 @@
 /**
  * Everything that is not the canvas: transport controls, state/status/error
- * surfaces, the live tuner readout, the active-event list and the event log.
+ * surfaces, the live tuner readout, the active-Note list and the note log.
  *
  * `ui.ts` knows about the DOM and about the library's public types; it knows
- * nothing about how a `Tuninator` is created or driven. `main.ts` owns that.
+ * nothing about how a `Recognizer` is created or driven. `main.ts` owns that.
  */
 
 import type {
-  MusicEvent,
+  Hypothesis,
+  Note,
+  NoteChange,
   PitchFrame,
-  TuninatorError,
-  TuninatorErrorCode,
-  TuninatorMode,
-  TuninatorState,
+  RecognizerErrorCode,
+  RecognizerErrorLike,
+  RecognizerState,
+  SourceTimeMs,
+  Timebase,
 } from "tuninator";
 
 import type { MetronomeStatus } from "./metronome.js";
@@ -21,20 +24,20 @@ export type SourceChoice = "auto" | "mock" | "live";
 
 export type UiCallbacks = {
   onToggleListen: () => void;
-  onModeChange: (mode: TuninatorMode) => void;
   onSourceChange: (source: SourceChoice) => void;
   onToggleMetronome: () => void;
   onMuteChange: (muted: boolean) => void;
 };
 
-const MODES: readonly TuninatorMode[] = ["lead", "chords", "rhythm", "raw"];
 const LOG_LIMIT = 150;
+/** Hypotheses shown per Note. The trail is curated but still unbounded-ish. */
+const HYPOTHESIS_LIMIT = 4;
 
 /**
- * Human-readable copy for every code in `TuninatorErrorCode`. A raw code is
+ * Human-readable copy for every code in `RecognizerErrorCode`. A raw code is
  * never shown on its own, and nothing is ever left to an uncaught console throw.
  */
-const ERROR_COPY: Record<TuninatorErrorCode, { title: string; hint: string }> = {
+const ERROR_COPY: Record<RecognizerErrorCode, { title: string; hint: string }> = {
   "mic-unavailable": {
     title: "No microphone found",
     hint: "Plug in or enable an input device, then press Start again.",
@@ -52,13 +55,23 @@ const ERROR_COPY: Record<TuninatorErrorCode, { title: string; hint: string }> = 
   },
   "worklet-unavailable": {
     title: "AudioWorklet is not supported",
-    hint: "This browser cannot run the analysis worklet. Try a current Chrome, Edge, Firefox or Safari.",
+    hint: "This browser cannot run the capture worklet. Try a current Chrome, Edge, Firefox or Safari.",
   },
   "worklet-load-failed": {
-    title: "The analysis worklet could not be loaded",
+    title: "The capture worklet could not be loaded",
     hint:
       "Check that `workletUrl` points at a real file. This demo expects " +
       "/assets/tuninator-worklet.js, copied from the library's dist/ by vite.config.ts.",
+  },
+  "engine-load-failed": {
+    title: "The recognition engine could not be loaded",
+    hint:
+      "The engine host refused to start. `host: \"worker\"` is not available in " +
+      "this build of the library; the demo uses the default inline host.",
+  },
+  "already-disposed": {
+    title: "This recognizer was already disposed",
+    hint: "A disposed recognizer cannot be restarted. Reload the page.",
   },
   unknown: {
     title: "Something went wrong",
@@ -66,12 +79,35 @@ const ERROR_COPY: Record<TuninatorErrorCode, { title: string; hint: string }> = 
   },
 };
 
-const STATE_COPY: Record<TuninatorState, string> = {
+const STATE_COPY: Record<RecognizerState, string> = {
   idle: "idle",
   starting: "starting…",
   listening: "listening",
-  "waiting-for-user-gesture": "tap to allow audio",
+  stopping: "stopping…",
   error: "error",
+};
+
+/**
+ * What each `NoteChange` means in one word, for the log.
+ *
+ * The type is the point of `noteChanged` in 0.2: "I know more now" and "I was
+ * wrong" arrive on the same subscription and must not read the same.
+ */
+const CHANGE_COPY: Record<NoteChange["type"], string> = {
+  confidenceUpdate: "confidence",
+  pitchRefinement: "refined",
+  pitchCorrection: "corrected",
+  pitchMovement: "moving",
+  bendUpdate: "bend",
+  pitchAdded: "pitch added",
+  pitchRemoved: "pitch removed",
+  harmonyEnrichment: "harmony",
+  harmonyCorrection: "harmony corrected",
+  hypothesisPromoted: "promoted",
+  hypothesisDiscredited: "discredited",
+  hypothesisIncorporated: "incorporated",
+  structuralRevision: "restructured",
+  resolved: "resolved",
 };
 
 function must<T extends HTMLElement>(id: string): T {
@@ -88,11 +124,26 @@ function clamp(value: number, low: number, high: number): number {
   return value < low ? low : value > high ? high : value;
 }
 
+/**
+ * What to call a Note.
+ *
+ * `harmony` present with `chordName` undefined is honest abstention: the
+ * recognizer knows more than one pitch is sounding and will not guess which
+ * chord. That renders as "…", never as a name picked here.
+ */
+export function labelOf(note: Note): string {
+  if (note.harmony) return note.harmony.chordName ?? "…";
+  return note.pitch.current?.name ?? "…";
+}
+
+function describeHypothesis(hypothesis: Hypothesis): string {
+  return `${hypothesis.label} ${hypothesis.state} (${hypothesis.confidence.toFixed(2)})`;
+}
+
 export class Ui {
   readonly canvas: HTMLCanvasElement;
 
   #listenBtn: HTMLButtonElement;
-  #modeSelect: HTMLSelectElement;
   #sourceSelect: HTMLSelectElement;
   #metronomeBtn: HTMLButtonElement;
   #muteCheckbox: HTMLInputElement;
@@ -118,20 +169,21 @@ export class Ui {
   #channelNote: HTMLElement;
   /** Bars currently in the DOM, rebuilt only when the channel count changes. */
   #channelBars: HTMLElement[] = [];
+  #timebaseValue: HTMLElement;
 
-  #activeEvents: HTMLElement;
-  #eventLog: HTMLElement;
+  /** Ids kept from the 0.1 markup: `must()` and the smoke suite both key on them. */
+  #activeNotes: HTMLElement;
+  #noteLog: HTMLElement;
   #logCount = 0;
 
   #pendingFrame: PitchFrame | null = null;
-  #pendingEvents: MusicEvent[] | null = null;
+  #pendingNotes: { notes: Note[]; sourceNowMs: SourceTimeMs } | null = null;
   #flushScheduled = false;
 
   constructor(callbacks: UiCallbacks) {
     this.canvas = must<HTMLCanvasElement>("timeline-canvas");
 
     this.#listenBtn = must<HTMLButtonElement>("listen-btn");
-    this.#modeSelect = must<HTMLSelectElement>("mode-select");
     this.#sourceSelect = must<HTMLSelectElement>("source-select");
     this.#metronomeBtn = must<HTMLButtonElement>("metronome-btn");
     this.#muteCheckbox = must<HTMLInputElement>("metronome-mute");
@@ -156,25 +208,15 @@ export class Ui {
     this.#channelMeters = must("channel-meters");
     this.#channelNote = must("channel-note");
     this.#channelMeters.parentElement?.classList.add("stacked");
+    this.#timebaseValue = must("timebase-value");
 
-    this.#activeEvents = must("active-events");
-    this.#eventLog = must("event-log");
-
-    for (const mode of MODES) {
-      const option = document.createElement("option");
-      option.value = mode;
-      option.textContent = mode;
-      this.#modeSelect.append(option);
-    }
+    this.#activeNotes = must("active-events");
+    this.#noteLog = must("event-log");
 
     this.#listenBtn.addEventListener("click", () => callbacks.onToggleListen());
     this.#metronomeBtn.addEventListener("click", () => callbacks.onToggleMetronome());
     this.#muteCheckbox.addEventListener("change", () =>
       callbacks.onMuteChange(this.#muteCheckbox.checked)
-    );
-    // setMode() is documented as safe while listening, so this stays enabled.
-    this.#modeSelect.addEventListener("change", () =>
-      callbacks.onModeChange(this.#modeSelect.value as TuninatorMode)
     );
     this.#sourceSelect.addEventListener("change", () =>
       callbacks.onSourceChange(this.#sourceSelect.value as SourceChoice)
@@ -189,17 +231,13 @@ export class Ui {
     this.#listenBtn.disabled = busy;
   }
 
-  setState(state: TuninatorState): void {
+  setState(state: RecognizerState): void {
     this.#statePill.textContent = STATE_COPY[state] ?? state;
     this.#statePill.dataset["state"] = state;
   }
 
   setStatus(message: string): void {
     this.#statusMessage.textContent = message;
-  }
-
-  setMode(mode: TuninatorMode): void {
-    this.#modeSelect.value = mode;
   }
 
   setSource(choice: SourceChoice, effective: "mock" | "live", note?: string): void {
@@ -217,14 +255,34 @@ export class Ui {
     if (status.message) this.setStatus(status.message);
   }
 
+  /**
+   * `getTimebase()`, rendered.
+   *
+   * Note timestamps are `SourceTimeMs` — audio since the first processed
+   * sample, epoch 0 — and this is the only thing relating them to the host's
+   * `AudioContext`. Showing it is how the demo makes the epoch change from 0.1
+   * visible rather than merely correct.
+   */
+  setTimebase(timebase: Timebase | null): void {
+    if (!timebase) {
+      this.#timebaseValue.textContent = "—";
+      return;
+    }
+    const origin =
+      timebase.originContextTime === undefined
+        ? "no ctx origin"
+        : `ctx +${timebase.originContextTime.toFixed(3)}s`;
+    this.#timebaseValue.textContent = `${timebase.sampleRate} Hz · ${origin}`;
+  }
+
   /* ---- errors ---- */
 
-  setError(error: TuninatorError | null): void {
+  setError(error: RecognizerErrorLike | null): void {
     if (!error) {
       this.#errorBanner.hidden = true;
       return;
     }
-    const copy = ERROR_COPY[error.code] ?? ERROR_COPY.unknown;
+    const copy = ERROR_COPY[error.code as RecognizerErrorCode] ?? ERROR_COPY.unknown;
     this.#errorTitle.textContent = copy.title;
     this.#errorCode.textContent = error.code;
     this.#errorMessage.textContent = error.message;
@@ -239,8 +297,8 @@ export class Ui {
     this.#scheduleFlush();
   }
 
-  setActiveEvents(events: MusicEvent[]): void {
-    this.#pendingEvents = events;
+  setActiveNotes(notes: Note[], sourceNowMs: SourceTimeMs): void {
+    this.#pendingNotes = { notes, sourceNowMs };
     this.#scheduleFlush();
   }
 
@@ -253,9 +311,9 @@ export class Ui {
         this.#renderFrame(this.#pendingFrame);
         this.#pendingFrame = null;
       }
-      if (this.#pendingEvents) {
-        this.#renderActiveEvents(this.#pendingEvents);
-        this.#pendingEvents = null;
+      if (this.#pendingNotes) {
+        this.#renderActiveNotes(this.#pendingNotes.notes, this.#pendingNotes.sourceNowMs);
+        this.#pendingNotes = null;
       }
     });
   }
@@ -308,6 +366,12 @@ export class Ui {
    * `selectedChannel` is the other half of it and cannot be inferred from the
    * levels: selection is hysteretic, so the loudest channel in any one frame is
    * routinely not the one being analysed.
+   *
+   * Both fields are optional in `PitchFrame`, and the 0.2 browser adapter does
+   * not populate either — the capture worklet measures them and the adapter
+   * drops them on the way to the engine. The empty state below is therefore
+   * what the live path currently shows, and it says so rather than rendering a
+   * plausible-looking blank meter.
    */
   #renderChannels(channelRms: number[] | undefined, selected: number | null | undefined): void {
     if (!channelRms || channelRms.length === 0) {
@@ -315,7 +379,7 @@ export class Ui {
         this.#channelMeters.replaceChildren();
         this.#channelBars = [];
       }
-      this.#channelNote.textContent = "—";
+      this.#channelNote.textContent = "not reported by this source";
       delete this.#channelNote.dataset["warn"];
       return;
     }
@@ -395,120 +459,162 @@ export class Ui {
     }
   }
 
-  #renderActiveEvents(events: MusicEvent[]): void {
-    if (events.length === 0) {
-      this.#activeEvents.innerHTML = '<p class="empty">nothing sounding</p>';
+  /**
+   * One card per active Note.
+   *
+   * Keyed by `note.id` rather than by "the current note": `getActiveNotes()` is
+   * genuinely plural in 0.2, so a restrum over a still-ringing chord is two
+   * cards at once.
+   */
+  #renderActiveNotes(notes: Note[], sourceNowMs: SourceTimeMs): void {
+    if (notes.length === 0) {
+      this.#activeNotes.innerHTML = '<p class="empty">nothing sounding</p>';
       return;
     }
 
     const fragment = document.createDocumentFragment();
-    for (const event of events) {
-      const row = document.createElement("div");
-      row.className = "event-card";
-      row.dataset["kind"] = event.kind;
+    for (const note of notes) {
+      fragment.append(this.#noteCard(note, sourceNowMs));
+    }
+    this.#activeNotes.replaceChildren(fragment);
+  }
 
-      const heading = document.createElement("div");
-      heading.className = "event-card-head";
+  #noteCard(note: Note, sourceNowMs: SourceTimeMs): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "event-card";
+    // A Note is only a chord once its harmony has bloomed; before that it is
+    // the same Note, drawn the same way. That IS the 0.2 model.
+    row.dataset["kind"] = note.harmony ? "chord" : "note";
 
-      const name = document.createElement("span");
-      name.className = "event-name";
-      name.textContent = event.label.name;
-      heading.append(name);
+    const heading = document.createElement("div");
+    heading.className = "event-card-head";
 
-      const state = document.createElement("span");
-      state.className = "chip";
-      state.dataset["state"] = event.state;
-      state.textContent = event.state;
-      heading.append(state);
+    const name = document.createElement("span");
+    name.className = "event-name";
+    name.textContent = labelOf(note);
+    heading.append(name);
 
-      const kind = document.createElement("span");
-      kind.className = "chip subtle";
-      kind.textContent = event.kind;
-      heading.append(kind);
+    const lifecycle = document.createElement("span");
+    lifecycle.className = "chip";
+    lifecycle.dataset["state"] = note.lifecycle;
+    lifecycle.textContent = note.lifecycle;
+    heading.append(lifecycle);
 
-      row.append(heading);
-
-      const meta = document.createElement("dl");
-      meta.className = "event-meta";
-      const duration = Math.round(event.updatedAt - event.startedAt);
-      addMeta(meta, "conf", event.confidence.toFixed(2));
-      addMeta(meta, "held", `${duration} ms`);
-      if (event.primaryPitch?.frequencyHz !== undefined) {
-        addMeta(meta, "f0", `${formatHz(event.primaryPitch.frequencyHz)} Hz`);
-      }
-      if (event.label.quality) addMeta(meta, "quality", event.label.quality);
-      if (event.bend.isActive || Math.abs(event.bend.centsFromStart) >= 1) {
-        const cents = event.bend.centsFromStart;
-        addMeta(
-          meta,
-          "bend",
-          `${cents >= 0 ? "+" : ""}${cents.toFixed(0)}¢ (${event.bend.semitonesFromStart.toFixed(2)} st)`
-        );
-      }
-      if (event.ambiguity.polyphony !== undefined) {
-        addMeta(meta, "poly", String(event.ambiguity.polyphony));
-      }
-      row.append(meta);
-
-      if (event.pitches.length > 1) {
-        const tones = document.createElement("div");
-        tones.className = "event-tones";
-        tones.textContent = event.pitches
-          .map((pitch) => pitch.name ?? (pitch.frequencyHz ? `${formatHz(pitch.frequencyHz)}Hz` : "?"))
-          .join(" · ");
-        row.append(tones);
-      }
-
-      const alternatives = event.ambiguity.alternatives;
-      if (alternatives && alternatives.length > 0) {
-        const alt = document.createElement("div");
-        alt.className = "event-alt";
-        alt.textContent = `also: ${alternatives
-          .map((a) => `${a.label} (${a.confidence.toFixed(2)})`)
-          .join(", ")}`;
-        row.append(alt);
-      }
-
-      fragment.append(row);
+    if (note.revision.lastChangeType) {
+      const change = document.createElement("span");
+      change.className = "chip subtle";
+      change.textContent = CHANGE_COPY[note.revision.lastChangeType];
+      heading.append(change);
     }
 
-    this.#activeEvents.replaceChildren(fragment);
+    row.append(heading);
+
+    const meta = document.createElement("dl");
+    meta.className = "event-meta";
+    const end = note.endTime ?? sourceNowMs;
+    addMeta(meta, "conf", note.confidence.toFixed(2));
+    addMeta(meta, "held", `${Math.max(0, Math.round(end - note.startTime))} ms`);
+    // `updatedAt` is gone in 0.2; the revision number is what makes a held
+    // snapshot's staleness checkable.
+    addMeta(meta, "rev", String(note.revision.revisionNumber));
+    if (note.pitch.currentFrequencyHz !== undefined) {
+      addMeta(meta, "f0", `${formatHz(note.pitch.currentFrequencyHz)} Hz`);
+    }
+    addMeta(meta, "from", note.origin.trigger);
+    if (note.harmony?.quality) addMeta(meta, "quality", note.harmony.quality);
+    if (note.harmony && !note.harmony.chordName) {
+      // Honest abstention, spelled out. The recognizer knows it is a chord and
+      // will not name it; a guess here would be the demo inventing data.
+      addMeta(meta, "chord", "unnamed (abstained)");
+    }
+    if (note.bend) {
+      const cents = note.bend.amountCents;
+      const peak = note.bend.peakAmountCents;
+      const released = note.bend.releaseDetected ? " · released" : "";
+      addMeta(
+        meta,
+        "bend",
+        `${note.bend.direction} ${cents >= 0 ? "+" : ""}${cents.toFixed(0)}¢ ` +
+          `(peak ${peak.toFixed(0)}¢)${released}`
+      );
+    }
+    const voices = note.harmony?.estimatedVoiceCount;
+    if (voices) addMeta(meta, "voices", `${voices.value} (${voices.confidence.toFixed(2)})`);
+    row.append(meta);
+
+    const tones = note.harmony?.detectedPitches ?? [];
+    if (tones.length > 1) {
+      const line = document.createElement("div");
+      line.className = "event-tones";
+      line.textContent = tones.map((pitch) => pitch.name).join(" · ");
+      row.append(line);
+    }
+
+    // What is still being entertained, and what was considered and dropped.
+    // The trail is the most visible new capability in 0.2: it is what to show a
+    // player who disagrees with the answer.
+    const active = note.hypotheses.active.filter((h) => h.label !== labelOf(note));
+    if (active.length > 0) {
+      const alt = document.createElement("div");
+      alt.className = "event-alt";
+      alt.textContent = `also: ${active.slice(0, HYPOTHESIS_LIMIT).map(describeHypothesis).join(", ")}`;
+      row.append(alt);
+    }
+
+    if (note.hypotheses.trail.length > 0) {
+      const trail = document.createElement("div");
+      trail.className = "event-alt trail";
+      trail.textContent = `ruled out: ${note.hypotheses.trail
+        .slice(-HYPOTHESIS_LIMIT)
+        .map(describeHypothesis)
+        .join(", ")}`;
+      row.append(trail);
+    }
+
+    return row;
   }
 
   /* ---- log ---- */
 
-  logEvent(phase: "start" | "end", event: MusicEvent): void {
-    const line = document.createElement("div");
-    line.className = "log-line";
-    line.dataset["phase"] = phase;
+  logStarted(note: Note): void {
+    this.#appendLog("start", "▶", labelOf(note), `conf ${note.confidence.toFixed(2)}`);
+  }
 
-    const marker = document.createElement("span");
-    marker.className = "log-marker";
-    marker.textContent = phase === "start" ? "▶" : "■";
+  /**
+   * A Note that started as a single pitch and grew a chord identity.
+   *
+   * Logged separately from every other change because it is the behaviour the
+   * whole 0.2 model exists for, and because it reads as a *correction* in any UI
+   * that only shows the final name.
+   */
+  logBloom(note: Note, change: NoteChange): void {
+    const was = change.previous?.label ?? note.origin.firstDetectedPitch?.name ?? "a single pitch";
+    this.#appendLog("change", "✽", labelOf(note), `bloomed from ${was} · rev ${change.revisionNumber}`);
+  }
 
-    const label = document.createElement("span");
-    label.className = "log-label";
-    label.textContent = event.label.name;
+  logChange(note: Note, change: NoteChange): void {
+    const previous = change.previous ? ` (was ${change.previous.label})` : "";
+    const related = change.relatedNoteIds?.length
+      ? ` · with ${change.relatedNoteIds.join(", ")}`
+      : "";
+    this.#appendLog(
+      "change",
+      "↻",
+      labelOf(note),
+      `${CHANGE_COPY[change.type]}${previous}${related} · rev ${change.revisionNumber}`
+    );
+  }
 
-    const detail = document.createElement("span");
-    detail.className = "log-detail";
-    if (phase === "start") {
-      detail.textContent = `${event.kind} · conf ${event.confidence.toFixed(2)}`;
-    } else {
-      const held = event.endedAt === null ? 0 : Math.round(event.endedAt - event.startedAt);
-      const bend = Math.abs(event.bend.centsFromStart) >= 20
-        ? ` · bend ${event.bend.centsFromStart >= 0 ? "+" : ""}${event.bend.centsFromStart.toFixed(0)}¢`
-        : "";
-      detail.textContent = `${held} ms${bend}`;
-    }
+  logResolved(note: Note): void {
+    this.#appendLog("resolved", "✓", labelOf(note), `settled · conf ${note.confidence.toFixed(2)}`);
+  }
 
-    line.append(marker, label, detail);
-    this.#eventLog.prepend(line);
-
-    this.#logCount += 1;
-    while (this.#eventLog.childElementCount > LOG_LIMIT) {
-      this.#eventLog.lastElementChild?.remove();
-    }
+  logEnded(note: Note): void {
+    const held = note.endTime === null ? 0 : Math.round(note.endTime - note.startTime);
+    const bend = note.bend
+      ? ` · bend ${note.bend.peakAmountCents >= 0 ? "+" : ""}${note.bend.peakAmountCents.toFixed(0)}¢`
+      : "";
+    this.#appendLog("end", "■", labelOf(note), `${held} ms${bend}`);
   }
 
   logNote(message: string): void {
@@ -519,11 +625,45 @@ export class Ui {
     detail.className = "log-detail";
     detail.textContent = message;
     line.append(detail);
-    this.#eventLog.prepend(line);
+    this.#prependLine(line);
+  }
+
+  #appendLog(
+    phase: "start" | "change" | "resolved" | "end",
+    marker: string,
+    label: string,
+    detail: string
+  ): void {
+    const line = document.createElement("div");
+    line.className = "log-line";
+    line.dataset["phase"] = phase;
+
+    const markerEl = document.createElement("span");
+    markerEl.className = "log-marker";
+    markerEl.textContent = marker;
+
+    const labelEl = document.createElement("span");
+    labelEl.className = "log-label";
+    labelEl.textContent = label;
+
+    const detailEl = document.createElement("span");
+    detailEl.className = "log-detail";
+    detailEl.textContent = detail;
+
+    line.append(markerEl, labelEl, detailEl);
+    this.#prependLine(line);
+    this.#logCount += 1;
+  }
+
+  #prependLine(line: HTMLElement): void {
+    this.#noteLog.prepend(line);
+    while (this.#noteLog.childElementCount > LOG_LIMIT) {
+      this.#noteLog.lastElementChild?.remove();
+    }
   }
 
   clearLog(): void {
-    this.#eventLog.replaceChildren();
+    this.#noteLog.replaceChildren();
     this.#logCount = 0;
   }
 

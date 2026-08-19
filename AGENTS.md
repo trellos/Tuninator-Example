@@ -7,17 +7,20 @@ is the stuff that is expensive to rediscover and easy to break.
 
 ## What this is
 
-A browser demo for the [`tuninator`](https://github.com/trellos/Tuninator) guitar-analysis library.
-It listens to a guitar — real microphone or a deterministic synthetic mock — and visualises the
-library's two output streams:
+A browser demo for the [`tuninator`](https://github.com/trellos/Tuninator) guitar-analysis library,
+targeting **0.2** — the streaming musical event recognizer, not the 0.1 pitch detector. It listens
+to a guitar — real microphone or a deterministic synthetic mock — and visualises:
 
-- **`pitchFrame`** — the continuous pitch/confidence/level stream, ~90 frames/sec
-- **`MusicEvent`** — higher-level note and chord events with `start` / `update` / `end` phases
+- **`Note`** — the primary stream. A Note starts as soon as there is evidence something was played
+  and then *improves*: `noteStarted` → `noteChanged(note, change)` → `noteResolved` → `noteEnded`.
+- **`pitchFrame`** — the continuous pitch/confidence/level stream underneath it. **Opt-in** in 0.2
+  (`diagnostics: { pitchFrames: true }`); the demo asks for it, and for `contour` too.
 
 Its job is to make the library's behaviour *visible*, including the failure modes. Several parts
-exist specifically to expose problems rather than to look good — the per-channel meters, the error
-banner's per-code copy, the `?failWith=` and `?shim=` hooks. Treat that as the design intent: when
-adding to this demo, prefer surfacing what the library is doing over hiding it.
+exist specifically to expose problems rather than to look good — the per-channel meters, the
+hypothesis trail, the error banner's per-code copy, the `?failWith=` and `?shim=` hooks. Treat that
+as the design intent: when adding to this demo, prefer surfacing what the library is doing over
+hiding it.
 
 It is one screen, no routing, no framework. Deployed to GitHub Pages at
 `https://trellos.github.io/Tuninator-Example/`.
@@ -30,8 +33,8 @@ It is one screen, no routing, no framework. Deployed to GitHub Pages at
 
 `package.json` declares `"tuninator": "file:../Tuninator"` and `vite.config.ts` aliases the import to
 `../Tuninator/src/index.ts`. The package is **not published to npm**. `src/main.ts` imports
-`createTuninator` as a *value*, so `?mock=1` does not rescue a missing library — Vite fails to
-resolve the module before any query parameter is read.
+`createRecognizer` and `RecognizerError` as *values*, so `?mock=1` does not rescue a missing library
+— Vite fails to resolve the module before any query parameter is read.
 
 ```
 parent/
@@ -41,7 +44,11 @@ parent/
 
 ```bash
 git clone https://github.com/trellos/Tuninator ../Tuninator
-cd ../Tuninator && npm ci && npm run build   # emits dist/tuninator-worklet.js
+cd ../Tuninator
+# The 0.2 recognizer API is not on the library's main yet. This demo does not
+# compile against main; see the deployment section on LIBRARY_REF.
+git checkout claude/guitar-event-recognizer-refactor-t5g5yr
+npm ci && npm run build                      # emits dist/tuninator-worklet.js
 cd ../Tuninator-Example && npm ci
 ```
 
@@ -60,11 +67,12 @@ checkout does not have. Update and rebuild `../Tuninator` before assuming your c
 Data flows one way: library → `App` → the view objects. Nothing calls back up.
 
 ```
-Tuninator (or MockTuninator)
-      │  pitchFrame / musicEvent
+Recognizer (real or MockRecognizer)
+      │  note* / pitchFrame
       ▼
-   App  (src/main.ts)  ── owns settings, wiring, error funnel, Timebase
-      ├──▶ Ui        (src/ui.ts)        panels, tuner, event cards, log
+   App  (src/main.ts)  ── owns settings, wiring, error funnel, WallClock,
+      │                    and the one shared AudioContext
+      ├──▶ Ui        (src/ui.ts)        panels, tuner, Note cards, log
       ├──▶ Timeline  (src/timeline.ts)  the <canvas>
       └──▶ Metronome (src/metronome.ts) Web Audio clock → BeatGrid
 ```
@@ -72,12 +80,12 @@ Tuninator (or MockTuninator)
 | file | responsibility |
 |---|---|
 | `index.html` | **All** markup. Static skeleton; nothing generates it. |
-| `src/main.ts` | `App`: reads URL settings, constructs the source, funnels every error to one place, owns `Timebase` (library clock → wall clock). |
-| `src/ui.ts` | `Ui`: imperative DOM controller. Owns `STATE_COPY` / `ERROR_COPY`. |
+| `src/main.ts` | `App`: reads URL settings, constructs the source, funnels every error to one place, owns the shared `AudioContext` and `WallClock` (`SourceTimeMs` → `performance.now()`). |
+| `src/ui.ts` | `Ui`: imperative DOM controller. Owns `STATE_COPY` / `ERROR_COPY` / `CHANGE_COPY` and `labelOf()`. |
 | `src/timeline.ts` | `Timeline`: the scrolling canvas. Its own rAF loop. |
 | `src/theme.ts` | `readTheme()` — bridges CSS custom properties into the canvas. |
 | `src/metronome.ts` | Lookahead Web Audio scheduler. No DOM. |
-| `src/mock-tuninator.ts` | Deterministic synthetic source implementing the same interface. No DOM. |
+| `src/mock-tuninator.ts` | Deterministic synthetic `Recognizer`. No DOM. Filename kept; the export is `createMockRecognizer`. |
 | `src/styles.css` | The only stylesheet. |
 | `scripts/smoke.mjs` | Playwright suite. The real test coverage. |
 
@@ -95,8 +103,14 @@ design — a typo fails loudly at construction rather than silently rendering no
 
 **The mock is a real implementation, not a stub.** `?mock=1` runs the entire UI with no microphone,
 no permission prompt and no library behaviour — which is what makes the smoke suite deterministic.
-When adding a field to the library's frame types, add it to `mock-tuninator.ts` too or the default
-demo goes blank where the real one does not.
+When adding a field to the library's `Note` or frame types, add it to `mock-tuninator.ts` too or the
+default demo goes blank where the real one does not.
+
+It also deliberately covers paths the real library only reaches sometimes: a Note that **blooms**
+into a chord, one **corrected** with `change.previous`, a chord it **will not name**, a **bend**,
+**overlapping** Notes, and non-empty `hypotheses.active`/`.trail`. Each of those has a smoke check.
+Changing the score can break one — check `npm run smoke` before assuming a rewrite of `SCORE` is
+cosmetic.
 
 ---
 
@@ -149,6 +163,10 @@ npm run smoke         # mock path; builds, serves, drives Chromium, rewrites scr
 npm run smoke:live    # the above PLUS the real library, stereo and comb-filter scenarios
 ```
 
+It prints `PASS` / `FAIL` and also `NOTE` — an observation that is neither, used where the library
+stopped supplying something optional. A `NOTE` never fails the run; see the library-gap section
+below for why it is a note and not a check.
+
 `npm run smoke:live` is the one that matters before pushing — it exercises the real library end to
 end, including a synthetic two-channel stream. **Run it with no stray `vite preview` on port 4173**;
 a leftover server silently serves a previous build and makes the run untrustworthy.
@@ -185,9 +203,12 @@ Debug hooks, all listed in `README.md` and surfaced in the page footer. The ones
 |---|---|
 | `?mock=1` / `?mock=0` | force the synthetic source / force the real library |
 | `?channels=auto\|sum\|<index>` | the library's `input.channels` |
-| `?failWith=<TuninatorErrorCode>` | make the mock's `start()` fail with that code |
+| `?failWith=<RecognizerErrorCode>` | make the mock's `start()` reject with that code |
 | `?workletUrl=/nope.js` | exercise `worklet-load-failed` |
 | `?shim=silent-ch0\|comb` | smoke-suite-only synthetic `getUserMedia` streams |
+
+`?mode=` is gone with the modes themselves. The smoke suite asserts no mode selector exists, so
+re-adding one fails the run rather than quietly drifting back.
 
 ---
 
@@ -197,12 +218,66 @@ Debug hooks, all listed in `README.md` and surfaced in the page footer. The ones
 `workflow_dispatch`. **There is no `pull_request` trigger** — a PR against this repo shows no checks,
 which is expected, not a stuck build. Local `npm run smoke:live` is the evidence for a PR.
 
-`LIBRARY_REF` pins which library revision CI builds against. It tracks `main` deliberately: pinning
-to a feature branch works right up until that branch is deleted by a merge, and then fails opaquely.
+`LIBRARY_REF` pins which library revision CI builds against. It is currently a **commit SHA** on the
+library's `claude/guitar-event-recognizer-refactor-t5g5yr` branch, because the 0.2 recognizer API
+this demo targets is not on the library's `main` yet — the demo does not compile against `main`.
+
+A SHA rather than the branch name on purpose: a feature branch works right up until it is deleted by
+its own merge, and then fails opaquely. Tracking `main` is still the steady state — **move it back
+the moment the library's rewrite lands there.**
 
 ### Known benign build output
 
-Vite logs `new URL("./tuninator-worklet.js", import.meta.url) doesn't exist at build time`. This is a
-plain log line, not a run annotation. It comes from the *library's* `resolveWorkletUrl` fallback, and
-the demo always passes an explicit `workletUrl`, so it is a branch this build never takes. Fixing it
-properly requires a change in the library repo, not here.
+Vite may log `new URL("./tuninator-worklet.js", import.meta.url) doesn't exist at build time`. This
+is a plain log line, not a run annotation. It comes from the *library's* default `workletUrl`, and
+the demo always passes an explicit one, so it is a branch this build never takes. Fixing it properly
+requires a change in the library repo, not here.
+
+---
+
+## The 0.2 migration, and what it left behind
+
+The demo was moved from the 0.1 pitch detector to the 0.2 recognizer. `README.md` has the full
+old→new table; these are the parts that are easy to get wrong again.
+
+**Source time restarts at 0 on every `start()`.** `SourceTimeMs` is audio since the first processed
+sample, not `AudioContext.currentTime` and not `performance.now()`. `WallClock` in `src/main.ts`
+converts, and it is reset on every transition to `starting`. Without that reset its running minimum
+survives a stop, and the whole timeline is drawn in the past after the first restart. This fails
+*silently* — the canvas is simply empty — so it will not announce itself.
+
+**One `AudioContext`, owned by the page.** `createSharedContext()` makes it, the metronome borrows
+it via `useContext()`, and it is passed to the library as `RecognizerOptions.audioContext`. The
+library never closes a context it did not create, so nothing else may close it either; `App` closes
+it on `pagehide` and nowhere else. This is also what lets `WallClock.anchor()` pin the timeline to
+the audio clock instead of estimating — the fallback estimator still exists for the mock, which has
+no context.
+
+**`note.harmony` present with `chordName` undefined is honest abstention.** `labelOf()` in
+`src/ui.ts` is the single place that turns a Note into a string, and it renders `…`. Do not add a
+second one that guesses.
+
+**Notes overlap.** Everything is keyed by `note.id`. The mock's C chord rings through the note after
+it specifically so this is exercised rather than assumed.
+
+### One library gap the demo now works around
+
+`PitchFrame.channelRms` and `.selectedChannel` are **not populated on the live path**. The capture
+worklet measures both and posts them on every `CaptureChunk`; `BrowserRecognizer` forwards only
+`samples` and `startSample` to the engine, so they never reach a `PitchFrame`. Both fields are
+optional, so this is a gap rather than a broken contract.
+
+Consequences to keep in mind:
+
+- The per-channel meters say *"not reported by this source"* on the live path. That copy is
+  load-bearing — it is the difference between "the library did not tell us" and "there is no
+  signal", and the smoke suite asserts it.
+- `scripts/smoke.mjs` reports the gap with `note()`, not `check()`. **Do not turn those back into
+  assertions against the current library** — they would fail. Equally, do not delete the surrounding
+  checks: the comb-filter pair (`channels=sum` reads an octave high, `auto` reads E3) is now the
+  *only* evidence that selection is happening at all, because `selectedChannel` no longer says so.
+- The channel-meter rendering is asserted on the **mock** run instead, which still supplies the
+  fields.
+
+If a later library revision starts forwarding them, both `check()` branches are still in
+`runStereoChannelCheck` behind an `if` and will start running on their own.

@@ -21,7 +21,7 @@
       <header class="app-header">
         <div class="title">
           <h1>Tuninator</h1>
-          <p>guitar analysis in the browser — pitch stream + music events</p>
+          <p>guitar analysis in the browser — Notes that improve as evidence arrives</p>
         </div>
         <span class="badge" id="source-badge" data-kind="mock">mock input</span>
       </header>
@@ -45,11 +45,10 @@
 
         <span class="spacer"></span>
 
-        <label class="field">
-          <span>Mode</span>
-          <!-- options are added by ui.ts from the TuninatorMode union -->
-          <select id="mode-select"></select>
-        </label>
+        <!-- There is no mode selector. 0.2 removed modes outright: one
+             recognizer runs the whole time and a Note blooms into a chord when
+             the evidence supports it, rather than the caller declaring in
+             advance what the player is about to do. -->
 
         <label class="field">
           <span>Source</span>
@@ -143,16 +142,31 @@
               <div class="channel-meters" id="channel-meters"></div>
               <span class="channel-note" id="channel-note">—</span>
             </dd>
+
+            <!--
+              getTimebase(). Note timestamps are SourceTimeMs — audio since the
+              first processed sample, epoch 0 — not AudioContext time, so this
+              is the only thing relating them to the host's own clock.
+            -->
+            <dt>timebase</dt>
+            <dd class="mono" id="timebase-value">—</dd>
           </dl>
         </section>
 
+        <!--
+          The ids below are 0.1 names kept on purpose: ui.ts `must()`s them and
+          scripts/smoke.mjs selects on them. The copy is what changed.
+        -->
         <section class="panel">
-          <div class="panel-head"><h2>Active events</h2><span class="muted">getActiveEvents()</span></div>
+          <div class="panel-head"><h2>Active notes</h2><span class="muted">getActiveNotes()</span></div>
           <div id="active-events" class="active-events"><p class="empty">nothing sounding</p></div>
         </section>
 
         <section class="panel">
-          <div class="panel-head"><h2>Event log</h2><span class="muted">start / end</span></div>
+          <div class="panel-head">
+            <h2>Note log</h2>
+            <span class="muted">started / changed / resolved / ended</span>
+          </div>
           <div id="event-log" class="event-log"></div>
         </section>
       </section>
@@ -163,8 +177,14 @@
         <p>
           <code>?mock=1</code> forces the synthetic source ·
           <code>?mock=0</code> forces the real library ·
+          <code>?channels=auto|sum|&lt;index&gt;</code> sets <code>input.channels</code> ·
           <code>?failWith=mic-permission-denied</code> exercises the error UI ·
           <code>?workletUrl=/nope.js</code> exercises <code>worklet-load-failed</code>
+        </p>
+        <p>
+          <code>?mode=</code> is gone: Tuninator 0.2 has no modes. One recognizer
+          runs the whole time and a Note blooms into a chord when the evidence
+          supports it.
         </p>
         </details>
       </footer>

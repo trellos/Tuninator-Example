@@ -27,8 +27,17 @@ env:
   # Branch/tag/commit of trellos/Tuninator to build the library from. The demo
   # repo's own state doesn't determine which library version it runs against,
   # so this is pinned explicitly rather than left to default-branch drift.
-  # trellos/Tuninator#1 merged the library into main; track that.
-  LIBRARY_REF: main
+  #
+  # This demo targets the 0.2 recognizer API, which at time of writing exists
+  # only on the library's `claude/guitar-event-recognizer-refactor-t5g5yr`
+  # branch -- `main` is still 0.1 and the demo does not compile against it.
+  #
+  # Pinned to a COMMIT, not that branch name: a feature branch works right up
+  # until it is deleted by its own merge, and then fails opaquely. A SHA cannot
+  # be deleted and cannot drift. **Move this back to `main` once the library's
+  # rewrite lands there** -- tracking main is the steady state; this pin is the
+  # exception that keeps the deploy building in the meantime.
+  LIBRARY_REF: f3c779d09e1d3c06fab3fb2514cf0f7f68cde1c2
 
 jobs:
   build:

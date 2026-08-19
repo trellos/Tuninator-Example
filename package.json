@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Vite browser demo for the tuninator guitar-analysis library: scrolling note timeline, 90bpm metronome, live tuner readout.",
+  "description": "Vite browser demo for the tuninator guitar-analysis library (0.2 recognizer): scrolling Note timeline, 90bpm metronome, live tuner readout.",
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",

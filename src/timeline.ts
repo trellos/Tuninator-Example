@@ -4,8 +4,9 @@
  * Geometry, exactly as specified:
  *   x(t) = width * (1 - (now - t) / windowMs)
  * so t == now lands on the RIGHT edge and older material slides LEFT. A bar's
- * length is the event's duration; an event that has not ended yet is drawn out
- * to the right edge and grows as time passes.
+ * length is the Note's duration; a Note that has not ended yet is drawn out to
+ * the right edge and grows as time passes. Notes can overlap in 0.2, so bars
+ * are keyed by `note.id` and several may share a column.
  *
  * The visible window is 16 beats of history. At 90bpm that is
  *   16 * (60000 / 90) = 16 * 666.667ms = 10666.67ms
@@ -13,12 +14,13 @@
  * lines up with what you hear.
  *
  * Everything in here works in `performance.now()` milliseconds ("wall" time).
- * Library timestamps are converted on the way in via `toWall`, because
- * `PitchFrame.timestamp` is only documented as "monotonic", never as sharing an
- * epoch with `performance.now()`.
+ * Library timestamps are `SourceTimeMs` -- audio since the first processed
+ * sample, epoch 0 -- and are converted on the way in via `toWall`. They are NOT
+ * `performance.now()` and they restart at 0 on every `start()`; `main.ts` owns
+ * that conversion and its reset.
  */
 
-import type { MusicEvent, MusicEventKind, MusicEventState } from "tuninator";
+import type { DetectedPitch, Note, NoteLifecycle, SourceTimeMs } from "tuninator";
 
 import { readTheme, withAlpha, type CanvasTheme } from "./theme.js";
 
@@ -38,27 +40,38 @@ const PAD_BOTTOM = 22;
 
 type Trace = { t: number; pitch: number };
 
-type TrackedEvent = {
+type TrackedNote = {
   id: string;
-  kind: MusicEventKind;
-  state: MusicEventState;
+  /** A Note is a chord once its harmony has bloomed, and not before. */
+  kind: "note" | "chord";
+  lifecycle: NoteLifecycle;
   label: string;
   /** Wall-clock ms. */
   startMs: number;
-  /** Wall-clock ms, or null while the event is still sounding. */
+  /** Wall-clock ms, or null while the Note is still sounding. */
   endMs: number | null;
   confidence: number;
-  /** Fractional MIDI for every pitch in the event, primary first. */
+  /** Fractional MIDI for every pitch in the Note, primary first. */
   pitches: number[];
   primary: number | null;
   bendCents: number;
   /** Primary-pitch history, so a bend draws as a curve rather than a step. */
   trace: Trace[];
+  /** True once `Note.pitch.contour` supplied the trace, which beats sampling it. */
+  traceFromContour: boolean;
+  /**
+   * Wall-clock ms at which `harmony` first appeared, or null if it never did.
+   *
+   * A bloom is retroactive — once a Note is a chord, its whole extent is drawn
+   * as one — so without a mark here the most characteristic 0.2 behaviour is
+   * invisible in the primary view. It happened at a point in time; say where.
+   */
+  bloomedAtMs: number | null;
 };
 
 export type TimelineOptions = {
-  /** Converts a library timestamp into `performance.now()` space. */
-  toWall: (libMs: number) => number;
+  /** Converts a `SourceTimeMs` into `performance.now()` space. */
+  toWall: (sourceMs: SourceTimeMs) => number;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -88,44 +101,50 @@ function midiFromScientificName(name: string): number | null {
 }
 
 /**
- * Every field of `EventPitch` except `role` and `confidence` is optional in
- * `types.ts`, so a consumer cannot rely on any single one being present. Try
- * them in order of precision rather than assuming.
+ * `DetectedPitch` guarantees `midi`, but its `frequencyHz` and `centsOffset` are
+ * optional, so the fractional position is taken from whatever is present in
+ * order of precision rather than assumed.
  */
-function pitchOfEventPitch(pitch: {
-  midi?: number;
-  frequencyHz?: number;
-  name?: string;
-  cents?: number;
-}): number | null {
-  if (typeof pitch.midi === "number" && Number.isFinite(pitch.midi)) {
-    return pitch.midi + (pitch.cents ?? 0) / 100;
-  }
+function pitchOfDetected(pitch: DetectedPitch): number | null {
   if (typeof pitch.frequencyHz === "number" && pitch.frequencyHz > 0) {
     return hzToMidi(pitch.frequencyHz);
   }
-  if (typeof pitch.name === "string") {
-    const fromName = midiFromScientificName(pitch.name);
-    if (fromName !== null) return fromName + (pitch.cents ?? 0) / 100;
-  }
-  return null;
+  if (Number.isFinite(pitch.midi)) return pitch.midi + (pitch.centsOffset ?? 0) / 100;
+  const fromName = midiFromScientificName(pitch.name);
+  return fromName === null ? null : fromName + (pitch.centsOffset ?? 0) / 100;
 }
 
-function extractPitches(event: MusicEvent): { pitches: number[]; primary: number | null } {
-  const primary = event.primaryPitch ? pitchOfEventPitch(event.primaryPitch) : null;
+/** The label a bar carries. Mirrors `labelOf()` in ui.ts. */
+function labelOf(note: Note): string {
+  if (note.harmony) return note.harmony.chordName ?? "…";
+  return note.pitch.current?.name ?? "…";
+}
+
+function extractPitches(note: Note): { pitches: number[]; primary: number | null } {
+  // The measurement first: `currentFrequencyHz` is continuous and survives a
+  // bend, where `pitch.current` has already been snapped to a note.
+  const primary =
+    typeof note.pitch.currentFrequencyHz === "number" && note.pitch.currentFrequencyHz > 0
+      ? hzToMidi(note.pitch.currentFrequencyHz)
+      : note.pitch.current
+        ? pitchOfDetected(note.pitch.current)
+        : null;
 
   const others: number[] = [];
-  for (const pitch of event.pitches) {
-    if (pitch.role === "overtone") continue;
-    const value = pitchOfEventPitch(pitch);
+  for (const pitch of note.harmony?.detectedPitches ?? []) {
+    const value = pitchOfDetected(pitch);
     if (value !== null) others.push(value);
   }
 
   // Last resort: a single-note label like "A4" still tells us where to draw.
-  const fromLabel = midiFromScientificName(event.label.name);
+  const fromLabel = midiFromScientificName(labelOf(note));
+  const originPitch = note.origin.firstDetectedPitch
+    ? pitchOfDetected(note.origin.firstDetectedPitch)
+    : null;
 
-  const resolvedPrimary = primary ?? others[0] ?? fromLabel;
-  const pitches = others.length > 0 ? others : resolvedPrimary !== null && resolvedPrimary !== undefined ? [resolvedPrimary] : [];
+  const resolvedPrimary = primary ?? others[0] ?? fromLabel ?? originPitch;
+  const pitches =
+    others.length > 0 ? others : resolvedPrimary !== null && resolvedPrimary !== undefined ? [resolvedPrimary] : [];
 
   return { pitches, primary: resolvedPrimary ?? null };
 }
@@ -164,9 +183,9 @@ function colourFor(midi: number, alpha: number, theme: CanvasTheme, lift = 0): s
 export class Timeline {
   #canvas: HTMLCanvasElement;
   #ctx: CanvasRenderingContext2D;
-  #toWall: (libMs: number) => number;
+  #toWall: (sourceMs: SourceTimeMs) => number;
 
-  #events = new Map<string, TrackedEvent>();
+  #notes = new Map<string, TrackedNote>();
   #grid: BeatGrid = { originMs: performance.now(), periodMs: 60_000 / 90, beatsPerBar: 4 };
 
   #cssWidth = 0;
@@ -212,41 +231,68 @@ export class Timeline {
     this.#hint = hint;
   }
 
-  /** Feed every `musicEventStart` / `Update` / `End` through here. */
-  track(event: MusicEvent): void {
-    const startMs = this.#toWall(event.startedAt);
-    const endMs = event.endedAt === null ? null : this.#toWall(event.endedAt);
-    const updatedMs = this.#toWall(event.updatedAt);
-    const { pitches, primary } = extractPitches(event);
+  /**
+   * Feed every `noteStarted` / `noteChanged` / `noteResolved` / `noteEnded`
+   * through here, keyed by `note.id`.
+   *
+   * `atSourceMs` is when this delivery's evidence is from -- `change.at` for a
+   * `noteChanged`, the Note's own start or end otherwise. There is no
+   * `updatedAt` in 0.2, and using the delivery moment instead would smear a
+   * bend's trace: the deep lane reports on audio the fast lane already passed.
+   */
+  track(note: Note, atSourceMs: SourceTimeMs): void {
+    const startMs = this.#toWall(note.startTime);
+    const endMs = note.endTime === null ? null : this.#toWall(note.endTime);
+    const atMs = this.#toWall(atSourceMs);
+    const { pitches, primary } = extractPitches(note);
 
-    const existing = this.#events.get(event.id);
-    const trace = existing?.trace ?? [];
+    const existing = this.#notes.get(note.id);
+    let trace = existing?.trace ?? [];
+    let traceFromContour = existing?.traceFromContour ?? false;
 
-    if (primary !== null) {
+    // `pitch.contour` (diagnostics: { contour: true }) is the library's own
+    // frequency trajectory, at the fast lane's hop rate rather than at whatever
+    // rate changes happen to be delivered. Prefer it, and stop sampling once it
+    // arrives so the two cannot interleave.
+    const contour = note.pitch.contour;
+    if (contour && contour.length > 0) {
+      trace = contour.map(([at, hz]) => ({ t: this.#toWall(at), pitch: hzToMidi(hz) }));
+      if (trace.length > TRACE_LIMIT) trace.splice(0, trace.length - TRACE_LIMIT);
+      traceFromContour = true;
+    } else if (!traceFromContour && primary !== null) {
       const last = trace[trace.length - 1];
-      if (!last || updatedMs - last.t > 25 || Math.abs(last.pitch - primary) > 0.01) {
-        trace.push({ t: updatedMs, pitch: primary });
+      if (!last || atMs - last.t > 25 || Math.abs(last.pitch - primary) > 0.01) {
+        trace.push({ t: atMs, pitch: primary });
         if (trace.length > TRACE_LIMIT) trace.splice(0, trace.length - TRACE_LIMIT);
       }
     }
 
-    this.#events.set(event.id, {
-      id: event.id,
-      kind: event.kind,
-      state: event.state,
-      label: event.label.name,
+    // The first delivery carrying `harmony` for a Note already on screen is the
+    // bloom. A Note whose very first delivery already has harmony did not
+    // bloom — it arrived as one — and gets no mark.
+    const bloomedAtMs =
+      existing?.bloomedAtMs ??
+      (note.harmony && existing && existing.kind === "note" ? atMs : null);
+
+    this.#notes.set(note.id, {
+      id: note.id,
+      kind: note.harmony ? "chord" : "note",
+      lifecycle: note.lifecycle,
+      label: labelOf(note),
       startMs,
       endMs,
-      confidence: event.confidence,
+      confidence: note.confidence,
       pitches,
       primary,
-      bendCents: event.bend.centsFromStart,
+      bendCents: note.bend?.amountCents ?? 0,
       trace,
+      traceFromContour,
+      bloomedAtMs,
     });
   }
 
   clear(): void {
-    this.#events.clear();
+    this.#notes.clear();
   }
 
   start(): void {
@@ -287,10 +333,10 @@ export class Timeline {
 
     this.#drawPitchGuides(width, height);
     this.#drawBeatGrid(now, width, height);
-    this.#drawEvents(now, width, height);
+    this.#drawNotes(now, width, height);
     this.#drawPlayhead(width, height);
 
-    if (this.#events.size === 0 && this.#hint) {
+    if (this.#notes.size === 0 && this.#hint) {
       ctx.fillStyle = this.#theme.hint;
       ctx.font = `14px ${this.#theme.fontMono}`;
       ctx.textAlign = "center";
@@ -314,9 +360,9 @@ export class Timeline {
 
   #prune(now: number): void {
     const cutoff = now - this.windowMs - 2000;
-    for (const [id, event] of this.#events) {
-      const end = event.endMs ?? now;
-      if (end < cutoff) this.#events.delete(id);
+    for (const [id, note] of this.#notes) {
+      const end = note.endMs ?? now;
+      if (end < cutoff) this.#notes.delete(id);
     }
   }
 
@@ -324,8 +370,8 @@ export class Timeline {
   #updatePitchRange(): void {
     let lo = Number.POSITIVE_INFINITY;
     let hi = Number.NEGATIVE_INFINITY;
-    for (const event of this.#events.values()) {
-      for (const pitch of event.pitches) {
+    for (const note of this.#notes.values()) {
+      for (const pitch of note.pitches) {
         if (pitch < lo) lo = pitch;
         if (pitch > hi) hi = pitch;
       }
@@ -408,71 +454,112 @@ export class Timeline {
     }
   }
 
-  #drawEvents(now: number, width: number, height: number): void {
+  #drawNotes(now: number, width: number, height: number): void {
     const ctx = this.#ctx;
-    const ordered = [...this.#events.values()].sort((a, b) => a.startMs - b.startMs);
+    const ordered = [...this.#notes.values()].sort((a, b) => a.startMs - b.startMs);
 
-    for (const event of ordered) {
-      const endMs = event.endMs ?? now; // still sounding -> runs to the right edge
-      const x0 = this.#xOf(event.startMs, now, width);
+    for (const note of ordered) {
+      const endMs = note.endMs ?? now; // still sounding -> runs to the right edge
+      const x0 = this.#xOf(note.startMs, now, width);
       const x1 = this.#xOf(endMs, now, width);
       if (x1 < -4 || x0 > width + 4) continue;
 
       // Dim low-confidence interpretations rather than hiding them.
-      const alpha = 0.22 + 0.78 * clamp01(event.confidence);
+      const alpha = 0.22 + 0.78 * clamp01(note.confidence);
       const left = Math.max(-2, x0);
       const right = Math.min(width, Math.max(x1, x0 + 2));
       const barWidth = Math.max(2, right - left);
 
       // Chord tones behind, thinner and dimmer than the primary.
-      for (const pitch of event.pitches) {
-        if (event.primary !== null && Math.abs(pitch - event.primary) < 0.001) continue;
+      for (const pitch of note.pitches) {
+        if (note.primary !== null && Math.abs(pitch - note.primary) < 0.001) continue;
         const y = this.#yOf(pitch, height);
         ctx.fillStyle = colourFor(pitch, alpha * 0.5, this.#theme);
         cutRect(ctx, left, y - CHORD_TONE_HEIGHT / 2, barWidth, CHORD_TONE_HEIGHT, 2);
         ctx.fill();
       }
 
-      if (event.primary === null) continue;
+      if (note.primary === null) continue;
 
-      const bent = Math.abs(event.bendCents) >= 20 && event.trace.length > 2;
+      const bent = Math.abs(note.bendCents) >= 20 && note.trace.length > 2;
       if (bent) {
-        this.#drawBentBar(event, now, width, height, alpha);
+        this.#drawBentBar(note, now, width, height, alpha);
       } else {
-        const y = this.#yOf(event.primary, height);
-        ctx.fillStyle = colourFor(event.primary, alpha, this.#theme, 6);
+        const y = this.#yOf(note.primary, height);
+        ctx.fillStyle = colourFor(note.primary, alpha, this.#theme, 6);
         cutRect(ctx, left, y - BAR_HEIGHT / 2, barWidth, BAR_HEIGHT, 3);
         ctx.fill();
       }
 
       // Attack marker: a bright cap at the note's onset.
       if (x0 >= -2 && x0 <= width) {
-        const y = this.#yOf(event.trace[0]?.pitch ?? event.primary, height);
+        const y = this.#yOf(note.trace[0]?.pitch ?? note.primary, height);
         ctx.fillStyle = withAlpha(this.#theme.highlight, 0.55 * alpha);
         ctx.fillRect(Math.max(0, x0), y - BAR_HEIGHT / 2, 2, BAR_HEIGHT);
       }
 
-      this.#drawLabel(event, left, right, height, alpha);
+      this.#drawBloom(note, now, width, height, alpha);
+      this.#drawLabel(note, left, right, height, alpha);
     }
   }
 
-  /** A bend stays one event: draw the primary as a ribbon through its trace. */
+  /**
+   * A tick where a Note became a chord.
+   *
+   * Blooming is retroactive in the drawing: once `harmony` arrives, the whole
+   * bar is a chord, back to its own onset. That is right — it was always a
+   * chord, the recognizer just did not know yet — but it erases the moment the
+   * answer changed, which is the single most characteristic 0.2 behaviour.
+   * This puts it back, as a dashed rule across the Note's own pitch span.
+   */
+  #drawBloom(
+    note: TrackedNote,
+    now: number,
+    width: number,
+    height: number,
+    alpha: number
+  ): void {
+    if (note.bloomedAtMs === null || note.pitches.length === 0) return;
+    const x = Math.round(this.#xOf(note.bloomedAtMs, now, width)) + 0.5;
+    if (x < 0 || x > width) return;
+
+    let lo = Number.POSITIVE_INFINITY;
+    let hi = Number.NEGATIVE_INFINITY;
+    for (const pitch of note.pitches) {
+      if (pitch < lo) lo = pitch;
+      if (pitch > hi) hi = pitch;
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return;
+
+    const ctx = this.#ctx;
+    ctx.save();
+    ctx.setLineDash([2, 3]);
+    ctx.strokeStyle = withAlpha(this.#theme.highlight, 0.65 * alpha);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, this.#yOf(hi, height) - BAR_HEIGHT / 2 - 2);
+    ctx.lineTo(x, this.#yOf(lo, height) + BAR_HEIGHT / 2 + 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** A bend stays one note: draw the primary as a ribbon through its trace. */
   #drawBentBar(
-    event: TrackedEvent,
+    note: TrackedNote,
     now: number,
     width: number,
     height: number,
     alpha: number
   ): void {
     const ctx = this.#ctx;
-    const points = event.trace.map((sample) => ({
+    const points = note.trace.map((sample) => ({
       x: this.#xOf(sample.t, now, width),
       y: this.#yOf(sample.pitch, height),
     }));
     const last = points[points.length - 1];
     if (!last) return;
     // Extend the ribbon to the playhead while the note is still sounding.
-    if (event.endMs === null) points.push({ x: width, y: last.y });
+    if (note.endMs === null) points.push({ x: width, y: last.y });
 
     const half = BAR_HEIGHT / 2;
     ctx.beginPath();
@@ -485,11 +572,11 @@ export class Timeline {
       if (point) ctx.lineTo(point.x, point.y + half);
     }
     ctx.closePath();
-    ctx.fillStyle = colourFor(event.primary ?? 60, alpha, this.#theme, 6);
+    ctx.fillStyle = colourFor(note.primary ?? 60, alpha, this.#theme, 6);
     ctx.fill();
 
     // A dashed ghost at the origin pitch makes the excursion legible.
-    const originPitch = firstPoint ? event.trace[0]?.pitch : null;
+    const originPitch = firstPoint ? note.trace[0]?.pitch : null;
     if (originPitch != null) {
       const y = this.#yOf(originPitch, height);
       ctx.save();
@@ -505,7 +592,7 @@ export class Timeline {
   }
 
   #drawLabel(
-    event: TrackedEvent,
+    note: TrackedNote,
     left: number,
     right: number,
     height: number,
@@ -513,17 +600,17 @@ export class Timeline {
   ): void {
     const ctx = this.#ctx;
     const available = right - left;
-    if (available < 22 || event.primary === null) return;
+    if (available < 22 || note.primary === null) return;
 
-    const text = event.label;
+    const text = note.label;
     ctx.font =
-      event.kind === "chord"
+      note.kind === "chord"
         ? `500 11px ${this.#theme.fontMono}`
         : `11px ${this.#theme.fontMono}`;
     const metrics = ctx.measureText(text);
     if (metrics.width + 8 > available) return;
 
-    const y = this.#yOf(event.primary, height);
+    const y = this.#yOf(note.primary, height);
     ctx.fillStyle = withAlpha(this.#theme.plate, 0.72 * alpha);
     ctx.fillRect(left + 3, y - BAR_HEIGHT / 2 - 14, metrics.width + 4, 13);
     ctx.fillStyle = withAlpha(this.#theme.plateText, Math.min(1, alpha + 0.15));

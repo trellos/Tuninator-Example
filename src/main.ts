@@ -1,25 +1,28 @@
 /**
- * Wiring: build a `Tuninator`, pump its two streams into the timeline and the
+ * Wiring: build a `Recognizer`, pump its streams into the timeline and the
  * panels, and keep the metronome running alongside.
  *
- * Only the public API is used. The single import from the library is
- * `createTuninator` plus types, from the package entry point.
+ * Only the public API is used. The imports from the library are
+ * `createRecognizer` and `RecognizerError` plus types, from the package entry
+ * point.
  */
 
-import { createTuninator } from "tuninator";
+import { createRecognizer, RecognizerError } from "tuninator";
 import type {
-  MusicEvent,
+  Note,
+  NoteChange,
   PitchFrame,
-  Tuninator,
-  TuninatorError,
-  TuninatorErrorCode,
-  TuninatorMode,
-  TuninatorOptions,
-  TuninatorState,
+  Recognizer,
+  RecognizerErrorCode,
+  RecognizerErrorLike,
+  RecognizerOptions,
+  RecognizerState,
+  SourceTimeMs,
+  Timebase,
 } from "tuninator";
 
 import { DEFAULT_BPM, Metronome } from "./metronome.js";
-import { createMockTuninator } from "./mock-tuninator.js";
+import { createMockRecognizer } from "./mock-tuninator.js";
 import { Timeline, WINDOW_BEATS } from "./timeline.js";
 import { Ui, type SourceChoice } from "./ui.js";
 
@@ -41,37 +44,77 @@ import "./styles.css";
  */
 const WORKLET_URL = `${import.meta.env.BASE_URL}assets/tuninator-worklet.js`;
 
-const ERROR_CODES: ReadonlySet<string> = new Set<TuninatorErrorCode>([
+const ERROR_CODES: ReadonlySet<string> = new Set<RecognizerErrorCode>([
   "mic-unavailable",
   "mic-permission-denied",
   "audio-context-failed",
   "worklet-unavailable",
   "worklet-load-failed",
+  "engine-load-failed",
+  "already-disposed",
   "unknown",
 ]);
 
-const MODES: ReadonlySet<string> = new Set<TuninatorMode>(["lead", "chords", "rhythm", "raw"]);
-
 /* -------------------------------------------------------------------------- */
-/* Timebase                                                                    */
+/* Wall clock                                                                  */
 /* -------------------------------------------------------------------------- */
 
 /**
- * `PitchFrame.timestamp` is documented as "milliseconds, monotonic, comparable
- * with MusicEvent timestamps" -- but NOT as sharing an epoch with
- * `performance.now()`. The timeline has to place events relative to *now*, so
- * this estimates the offset between the two clocks instead of assuming one.
+ * Converts `SourceTimeMs` into `performance.now()` space.
  *
- * The smallest observed `wall - lib` is the least-delayed sample and therefore
- * the best alignment estimate; a slow relaxation term keeps it from sticking to
- * an outlier if the clocks drift.
+ * The library's clock is *source* time: milliseconds of audio since the first
+ * processed sample, epoch 0, derived from a sample count and nothing else. The
+ * timeline draws relative to `performance.now()`, so the two need relating.
+ *
+ * There are two ways to do it, and this uses the better one when it can:
+ *
+ *  - **Anchored.** `getTimebase().originContextTime` is `AudioContext.currentTime`
+ *    at source time 0. Because the demo hands the recognizer the same context
+ *    the metronome runs on, that value can be read against this page's own
+ *    clock — `getOutputTimestamp()` gives the two together — and the offset is
+ *    then exact rather than inferred.
+ *  - **Estimated.** With no shared context (the mock has none), the smallest
+ *    observed `wall - source` is the least-delayed sample and therefore the best
+ *    alignment estimate; a slow relaxation term keeps it from sticking to an
+ *    outlier if the clocks drift.
+ *
+ * Either way it MUST be reset on every `start()`: source time restarts at 0 each
+ * time while `performance.now()` does not, so a stale minimum from a previous
+ * run would place the whole timeline in the distant past.
  */
-class Timebase {
+class WallClock {
+  /** `performance.now()` at source time 0. */
   #offset: number | null = null;
+  #anchored = false;
 
-  observe(libMs: number): void {
-    if (!Number.isFinite(libMs)) return;
-    const sample = performance.now() - libMs;
+  /**
+   * Pin the offset exactly, from the recognizer's own timebase.
+   *
+   * Returns false when there is nothing to pin it to — no timebase, no
+   * `originContextTime` (an offline clock), or no context to read against.
+   */
+  anchor(timebase: Timebase | null, context: AudioContext | null): boolean {
+    if (!timebase || timebase.originContextTime === undefined || !context) return false;
+
+    // `getOutputTimestamp()` exists precisely to sample the audio clock and the
+    // page clock as one pair; reading the two separately is a fallback.
+    const stamp = context.getOutputTimestamp?.();
+    const usable =
+      stamp !== undefined &&
+      Number.isFinite(stamp.contextTime) &&
+      Number.isFinite(stamp.performanceTime) &&
+      (stamp.contextTime ?? 0) > 0;
+    const contextTime = usable ? (stamp.contextTime as number) : context.currentTime;
+    const wall = usable ? (stamp.performanceTime as number) : performance.now();
+
+    this.#offset = wall - (contextTime - timebase.originContextTime) * 1000;
+    this.#anchored = true;
+    return true;
+  }
+
+  observe(sourceMs: SourceTimeMs): void {
+    if (this.#anchored || !Number.isFinite(sourceMs)) return;
+    const sample = performance.now() - sourceMs;
     if (this.#offset === null || sample < this.#offset) {
       this.#offset = sample;
       return;
@@ -79,12 +122,17 @@ class Timebase {
     this.#offset += (sample - this.#offset) * 0.0008;
   }
 
-  toWall(libMs: number): number {
-    return libMs + (this.#offset ?? 0);
+  toWall(sourceMs: SourceTimeMs): number {
+    return sourceMs + (this.#offset ?? performance.now());
+  }
+
+  get anchored(): boolean {
+    return this.#anchored;
   }
 
   reset(): void {
     this.#offset = null;
+    this.#anchored = false;
   }
 }
 
@@ -92,37 +140,68 @@ class Timebase {
 /* Error normalisation                                                         */
 /* -------------------------------------------------------------------------- */
 
-function isTuninatorError(value: unknown): value is TuninatorError {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as { code?: unknown; message?: unknown };
-  return (
-    typeof candidate.code === "string" &&
-    ERROR_CODES.has(candidate.code) &&
-    typeof candidate.message === "string"
-  );
-}
-
 /**
- * `Tuninator.start()` is typed `Promise<void>`, so what it rejects *with* is not
- * part of the contract. Anything that escapes is folded into a `TuninatorError`
- * here so the UI always has a code and a readable message, never a raw throw.
+ * Everything the library rejects or emits is already a `RecognizerError`, but
+ * the demo also funnels `window.onerror` and stray rejections through the same
+ * banner, so anything else is wrapped here. The UI therefore always has a code
+ * and a readable message, never a raw throw.
  */
-function toTuninatorError(cause: unknown): TuninatorError {
-  if (isTuninatorError(cause)) return cause;
+function toRecognizerError(cause: unknown): RecognizerError {
+  if (cause instanceof RecognizerError) return cause;
 
   if (typeof DOMException !== "undefined" && cause instanceof DOMException) {
     if (cause.name === "NotAllowedError" || cause.name === "SecurityError") {
-      return { code: "mic-permission-denied", message: cause.message || cause.name, cause };
+      return new RecognizerError("mic-permission-denied", cause.message || cause.name, cause);
     }
     if (cause.name === "NotFoundError" || cause.name === "OverconstrainedError") {
-      return { code: "mic-unavailable", message: cause.message || cause.name, cause };
+      return new RecognizerError("mic-unavailable", cause.message || cause.name, cause);
+    }
+  }
+
+  // A thrown object carrying a known code but not extending Error — the shape
+  // 0.1 used. Preserved so a mixed checkout still reports something useful.
+  if (typeof cause === "object" && cause !== null) {
+    const candidate = cause as { code?: unknown; message?: unknown };
+    if (typeof candidate.code === "string" && ERROR_CODES.has(candidate.code)) {
+      return new RecognizerError(
+        candidate.code as RecognizerErrorCode,
+        typeof candidate.message === "string" ? candidate.message : candidate.code,
+        cause
+      );
     }
   }
 
   if (cause instanceof Error) {
-    return { code: "unknown", message: cause.message || String(cause), cause };
+    return new RecognizerError("unknown", cause.message || String(cause), cause);
   }
-  return { code: "unknown", message: String(cause), cause };
+  return new RecognizerError("unknown", String(cause), cause);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Audio context                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The one `AudioContext` the page owns, handed to both the metronome and the
+ * library.
+ *
+ * Constructed at load, which leaves it `suspended` under an autoplay policy;
+ * both consumers `resume()` it from inside a user gesture, so there is nothing
+ * to defer. A browser with no Web Audio at all returns null and each side falls
+ * back to making its own — the demo still runs, it just cannot align the two
+ * clocks exactly.
+ */
+function createSharedContext(): AudioContext | null {
+  const Ctor =
+    typeof AudioContext !== "undefined"
+      ? AudioContext
+      : (globalThis as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!Ctor) return null;
+  try {
+    return new Ctor();
+  } catch {
+    return null;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -131,9 +210,8 @@ function toTuninatorError(cause: unknown): TuninatorError {
 
 type Settings = {
   source: SourceChoice;
-  mode: TuninatorMode;
   workletUrl: string;
-  failWith: TuninatorErrorCode | null;
+  failWith: RecognizerErrorCode | null;
   autostart: boolean;
   metronome: boolean;
   /** `input.channels`: which input channel(s) the library should analyse. */
@@ -151,19 +229,15 @@ function readSettings(): Settings {
         ? "live"
         : "mock";
 
-  const modeParam = params.get("mode");
-  const mode: TuninatorMode = modeParam && MODES.has(modeParam) ? (modeParam as TuninatorMode) : "lead";
-
   const failParam = params.get("failWith");
   const failWith =
-    failParam && ERROR_CODES.has(failParam) ? (failParam as TuninatorErrorCode) : null;
+    failParam && ERROR_CODES.has(failParam) ? (failParam as RecognizerErrorCode) : null;
 
   const truthy = (value: string | null): boolean =>
     value !== null && value !== "0" && value !== "false";
 
   return {
     source,
-    mode,
     workletUrl: params.get("workletUrl") ?? WORKLET_URL,
     failWith,
     autostart: truthy(params.get("autostart")),
@@ -194,29 +268,63 @@ function readChannels(value: string | null): "auto" | "sum" | number {
 /** Counters the headless smoke test reads to assert the streams really flowed. */
 type DemoProbe = {
   frames: number;
-  eventsStarted: number;
-  eventsEnded: number;
+  notesStarted: number;
+  notesChanged: number;
+  notesResolved: number;
+  notesEnded: number;
+  /** Notes that acquired `harmony` *after* they had already started — a bloom. */
+  notesBloomed: number;
+  /** `pitchCorrection` / `harmonyCorrection` changes seen. */
+  corrections: number;
+  /** True once a Note was delivered with `lifecycle === "resolved"`. */
+  sawResolvedLifecycle: boolean;
   source: "mock" | "live";
-  state: TuninatorState;
-  lastError: TuninatorError | null;
+  state: RecognizerState;
+  lastError: { code: string; message: string } | null;
+  /** `getTimebase()` as of the last start. Null until `start()` resolves. */
+  timebase: Timebase | null;
+  /** True when the timeline is pinned to the audio clock rather than estimated. */
+  timebaseAnchored: boolean;
   /** Last `PitchFrame.selectedChannel`: index, null for summed, undefined for none. */
   selectedChannel: number | null | undefined;
   /** Last `PitchFrame.channelRms`. */
   channelRms: number[] | undefined;
 };
 
+/** Changes worth a line in the log. The rest would drown it. */
+const LOGGED_CHANGES: ReadonlySet<NoteChange["type"]> = new Set([
+  "pitchCorrection",
+  "harmonyCorrection",
+  "harmonyEnrichment",
+  "structuralRevision",
+]);
+
 class App {
   #settings: Settings;
   #ui: Ui;
   #timeline: Timeline;
   #metronome: Metronome;
-  #timebase = new Timebase();
+  #wallClock = new WallClock();
 
-  #tuninator: Tuninator | null = null;
+  #recognizer: Recognizer | null = null;
+  /**
+   * One `AudioContext` for the whole page, shared with the library.
+   *
+   * 0.2 added `RecognizerOptions.audioContext` and promises never to close a
+   * context it did not create, which is what makes this safe. It is also what
+   * makes `getTimebase().originContextTime` usable: the metronome's clicks and
+   * the recognizer's Notes are now on one audio clock rather than two.
+   */
+  #audioContext: AudioContext | null = null;
   #unsubscribes: Array<() => void> = [];
   #effectiveSource: "mock" | "live" = "mock";
   #listening = false;
   #busy = false;
+
+  /** Latest source time seen on any stream. Stands in for "now" in the Note model. */
+  #sourceNowMs: SourceTimeMs = 0;
+  /** Note ids that were delivered without `harmony`, so a bloom is detectable. */
+  #pitchOnlyNotes = new Set<string>();
 
   #probe: DemoProbe;
 
@@ -225,17 +333,18 @@ class App {
 
     this.#ui = new Ui({
       onToggleListen: () => void this.#toggleListen(),
-      onModeChange: (mode) => this.#setMode(mode),
       onSourceChange: (source) => void this.#setSource(source),
       onToggleMetronome: () => void this.#toggleMetronome(),
       onMuteChange: (muted) => this.#metronome.setMuted(muted),
     });
 
     this.#timeline = new Timeline(this.#ui.canvas, {
-      toWall: (libMs) => this.#timebase.toWall(libMs),
+      toWall: (sourceMs) => this.#wallClock.toWall(sourceMs),
     });
 
     this.#metronome = new Metronome(DEFAULT_BPM);
+    this.#audioContext = createSharedContext();
+    if (this.#audioContext) this.#metronome.useContext(this.#audioContext);
     this.#metronome.onChange((status) => {
       this.#ui.setMetronome(status, DEFAULT_BPM);
       this.#timeline.setGrid(this.#metronome.getGrid());
@@ -243,11 +352,18 @@ class App {
 
     this.#probe = {
       frames: 0,
-      eventsStarted: 0,
-      eventsEnded: 0,
+      notesStarted: 0,
+      notesChanged: 0,
+      notesResolved: 0,
+      notesEnded: 0,
+      notesBloomed: 0,
+      corrections: 0,
+      sawResolvedLifecycle: false,
       source: "mock",
       state: "idle",
       lastError: null,
+      timebase: null,
+      timebaseAnchored: false,
       selectedChannel: undefined,
       channelRms: undefined,
     };
@@ -255,7 +371,6 @@ class App {
     this.#timeline.setGrid(this.#metronome.getGrid());
     this.#timeline.start();
 
-    this.#ui.setMode(settings.mode);
     this.#ui.setState("idle");
     this.#ui.setListening(false);
     this.#ui.setMetronome({ running: false, message: null }, DEFAULT_BPM);
@@ -265,6 +380,7 @@ class App {
     );
 
     this.#installGlobalErrorHandlers();
+    this.#installUnloadHandler();
     this.#build(settings.source);
 
     if (settings.metronome) void this.#metronome.start();
@@ -277,32 +393,40 @@ class App {
 
   /* ---- construction ---- */
 
-  #baseOptions(): TuninatorOptions {
+  #baseOptions(): RecognizerOptions {
     return {
-      mode: this.#settings.mode,
+      // Caller-owned, and the library never closes a context it did not create.
+      // Sharing it is what puts the metronome and the analysis on one clock.
+      ...(this.#audioContext ? { audioContext: this.#audioContext } : {}),
       workletUrl: this.#settings.workletUrl,
       input: { channels: this.#settings.channels },
-      analysis: { minFrequencyHz: 70, maxFrequencyHz: 1400 },
+      // 0.2 folds the old `analysis` and `tracking` blocks into one `engine`.
+      engine: { minFrequencyHz: 70, maxFrequencyHz: 1400 },
+      // Both streams are opt-in in 0.2. The tuner readout is the pitch stream,
+      // and the timeline draws a bend as a curve rather than a step, so both
+      // are asked for explicitly.
+      diagnostics: { pitchFrames: true, contour: true },
     };
   }
 
   /**
    * `auto` prefers the real library and falls back to the mock if it cannot be
-   * constructed at all -- which is exactly the situation while the detector is
-   * still being written (`createTuninator` throws "not implemented").
+   * constructed at all. `createRecognizer` does no work until `start()`, so in
+   * practice this only catches a genuinely broken checkout — but the fallback
+   * is what keeps the deployed demo usable when the library changes under it.
    */
   #build(choice: SourceChoice): void {
     this.#teardown();
 
-    let instance: Tuninator | null = null;
+    let instance: Recognizer | null = null;
     let note: string | undefined;
 
     if (choice !== "mock") {
       try {
-        instance = createTuninator(this.#baseOptions());
+        instance = createRecognizer(this.#baseOptions());
         this.#effectiveSource = "live";
       } catch (cause) {
-        const error = toTuninatorError(cause);
+        const error = toRecognizerError(cause);
         if (choice === "live") {
           this.#ui.setError(error);
           this.#ui.logNote(`live source unavailable: ${error.message}`);
@@ -316,17 +440,16 @@ class App {
     }
 
     if (!instance) {
-      instance = createMockTuninator({
+      instance = createMockRecognizer({
         ...this.#baseOptions(),
         ...(this.#settings.failWith ? { failWith: this.#settings.failWith } : {}),
       });
       this.#effectiveSource = "mock";
     }
 
-    this.#tuninator = instance;
+    this.#recognizer = instance;
     this.#probe.source = this.#effectiveSource;
     this.#ui.setSource(choice, this.#effectiveSource, note);
-    this.#ui.setMode(instance.getMode());
     this.#ui.setState(instance.getState());
     this.#timeline.setHint(
       this.#effectiveSource === "mock"
@@ -336,35 +459,38 @@ class App {
     this.#subscribe(instance);
   }
 
-  #subscribe(tuninator: Tuninator): void {
-    this.#unsubscribes.push(
-      tuninator.on("stateChange", (state: TuninatorState) => {
+  #subscribe(recognizer: Recognizer): void {
+    const add = (unsubscribe: () => void): void => {
+      this.#unsubscribes.push(unsubscribe);
+    };
+
+    add(
+      recognizer.on("stateChange", (state: RecognizerState) => {
         this.#probe.state = state;
         this.#ui.setState(state);
         this.#listening = state === "listening";
         this.#ui.setListening(this.#listening, this.#busy);
-        if (state === "waiting-for-user-gesture") {
-          this.#ui.setStatus("Audio is waiting for a click — press Start again.");
-        }
+        // Source time restarts at 0 on every start, so the wall-clock offset
+        // measured during the previous run is worse than having none.
+        if (state === "starting") this.#resetClock();
+        if (state === "listening") this.#reportTimebase(recognizer);
         if (state !== "error") this.#ui.setError(null);
       })
     );
 
-    this.#unsubscribes.push(
-      tuninator.on("status", (message: string) => this.#ui.setStatus(message))
-    );
+    add(recognizer.on("status", (message: string) => this.#ui.setStatus(message)));
 
-    this.#unsubscribes.push(
-      tuninator.on("error", (error: TuninatorError) => {
-        this.#probe.lastError = error;
+    add(
+      recognizer.on("error", (error: RecognizerErrorLike) => {
+        this.#probe.lastError = { code: error.code, message: error.message };
         this.#ui.setError(error);
         this.#ui.logNote(`error (${error.code}): ${error.message}`);
       })
     );
 
-    this.#unsubscribes.push(
-      tuninator.on("pitchFrame", (frame: PitchFrame) => {
-        this.#timebase.observe(frame.timestamp);
+    add(
+      recognizer.on("pitchFrame", (frame: PitchFrame) => {
+        this.#observe(frame.timestamp);
         this.#probe.frames += 1;
         this.#probe.selectedChannel = frame.selectedChannel;
         this.#probe.channelRms = frame.channelRms;
@@ -372,55 +498,137 @@ class App {
       })
     );
 
-    this.#unsubscribes.push(
-      tuninator.on("musicEventStart", (event: MusicEvent) => {
-        this.#timebase.observe(event.startedAt);
-        this.#probe.eventsStarted += 1;
-        this.#timeline.track(event);
-        this.#ui.logEvent("start", event);
-        this.#ui.setActiveEvents(tuninator.getActiveEvents());
+    add(
+      recognizer.on("noteStarted", (note: Note) => {
+        this.#observe(note.startTime);
+        this.#probe.notesStarted += 1;
+        if (!note.harmony) this.#pitchOnlyNotes.add(note.id);
+        this.#timeline.track(note, note.startTime);
+        this.#ui.logStarted(note);
+        this.#publishActive(recognizer);
       })
     );
 
-    this.#unsubscribes.push(
-      tuninator.on("musicEventUpdate", (event: MusicEvent) => {
-        this.#timebase.observe(event.updatedAt);
-        this.#timeline.track(event);
-        this.#ui.setActiveEvents(tuninator.getActiveEvents());
+    add(
+      recognizer.on("noteChanged", (note: Note, change: NoteChange) => {
+        this.#observe(change.at);
+        this.#probe.notesChanged += 1;
+        if (change.type === "pitchCorrection" || change.type === "harmonyCorrection") {
+          this.#probe.corrections += 1;
+        }
+        // A bloom is a Note that started as a single pitch and later acquired a
+        // chord identity. It is the behaviour the 0.2 model exists for, so it
+        // is called out rather than folded into the generic change log.
+        if (note.harmony && this.#pitchOnlyNotes.delete(note.id)) {
+          this.#probe.notesBloomed += 1;
+          this.#ui.logBloom(note, change);
+        } else if (LOGGED_CHANGES.has(change.type)) {
+          this.#ui.logChange(note, change);
+        }
+        this.#timeline.track(note, change.at);
+        this.#publishActive(recognizer);
       })
     );
 
-    this.#unsubscribes.push(
-      tuninator.on("musicEventEnd", (event: MusicEvent) => {
-        this.#timebase.observe(event.endedAt ?? event.updatedAt);
-        this.#probe.eventsEnded += 1;
-        this.#timeline.track(event);
-        this.#ui.logEvent("end", event);
-        this.#ui.setActiveEvents(tuninator.getActiveEvents());
+    add(
+      recognizer.on("noteResolved", (note: Note) => {
+        this.#probe.notesResolved += 1;
+        if (note.lifecycle === "resolved") this.#probe.sawResolvedLifecycle = true;
+        this.#timeline.track(note, this.#sourceNowMs);
+        this.#ui.logResolved(note);
+        this.#publishActive(recognizer);
       })
     );
+
+    add(
+      recognizer.on("noteEnded", (note: Note) => {
+        this.#observe(note.endTime ?? note.startTime);
+        this.#probe.notesEnded += 1;
+        this.#pitchOnlyNotes.delete(note.id);
+        this.#timeline.track(note, note.endTime ?? this.#sourceNowMs);
+        this.#ui.logEnded(note);
+        this.#publishActive(recognizer);
+      })
+    );
+  }
+
+  #publishActive(recognizer: Recognizer): void {
+    // Genuinely plural in 0.2: a restrum over a still-ringing chord is two
+    // Notes at once, so this is a list keyed by id rather than "the current one".
+    this.#ui.setActiveNotes(recognizer.getActiveNotes(), this.#sourceNowMs);
+  }
+
+  #observe(sourceMs: SourceTimeMs): void {
+    if (!Number.isFinite(sourceMs)) return;
+    this.#wallClock.observe(sourceMs);
+    if (sourceMs > this.#sourceNowMs) this.#sourceNowMs = sourceMs;
+  }
+
+  #resetClock(): void {
+    this.#wallClock.reset();
+    this.#sourceNowMs = 0;
+    this.#pitchOnlyNotes.clear();
+  }
+
+  /**
+   * `getTimebase()` is new in 0.2 and is the only thing relating source time to
+   * the host's own clock. Surfacing it is the point of the demo: an integrator
+   * lining Notes up against their own scheduled audio needs exactly this.
+   */
+  #reportTimebase(recognizer: Recognizer): void {
+    const timebase = recognizer.getTimebase();
+    this.#probe.timebase = timebase;
+    this.#ui.setTimebase(timebase);
+    // Pin the timeline to the audio clock if the recognizer gave us an origin
+    // on a context we can read. Otherwise the estimator keeps running.
+    this.#wallClock.anchor(timebase, this.#audioContext);
+    this.#probe.timebaseAnchored = this.#wallClock.anchored;
+    if (timebase) {
+      const origin =
+        timebase.originContextTime === undefined
+          ? "no context origin (offline clock)"
+          : `origin ctx ${timebase.originContextTime.toFixed(3)}s`;
+      const alignment = this.#wallClock.anchored ? "anchored" : "estimated";
+      this.#ui.logNote(`timebase: ${timebase.sampleRate}Hz · ${origin} · ${alignment}`);
+    }
   }
 
   #teardown(): void {
     for (const unsubscribe of this.#unsubscribes) unsubscribe();
     this.#unsubscribes = [];
-    this.#tuninator?.stop();
-    this.#tuninator = null;
+    // The instance is being discarded, so release the microphone and the
+    // worklet with it rather than leaving them held by an unreachable object.
+    const going = this.#recognizer;
+    this.#recognizer = null;
+    if (going) void going.dispose().catch(() => {});
     this.#listening = false;
-    this.#timebase.reset();
+    this.#resetClock();
+    this.#ui.setTimebase(null);
+    this.#probe.timebase = null;
+    this.#probe.timebaseAnchored = false;
   }
 
   /* ---- transport ---- */
 
   async #toggleListen(): Promise<void> {
-    const tuninator = this.#tuninator;
-    if (!tuninator || this.#busy) return;
+    const recognizer = this.#recognizer;
+    if (!recognizer || this.#busy) return;
 
-    if (this.#listening || tuninator.getState() === "listening") {
-      tuninator.stop();
-      this.#listening = false;
-      this.#ui.setListening(false);
-      this.#ui.setActiveEvents([]);
+    if (this.#listening || recognizer.getState() === "listening") {
+      this.#busy = true;
+      this.#ui.setListening(true, true);
+      try {
+        // Async in 0.2, and awaiting it is what guarantees every Note still
+        // sounding gets its `noteEnded` instead of being dropped mid-flight.
+        await recognizer.stop();
+      } catch (cause) {
+        this.#ui.setError(toRecognizerError(cause));
+      } finally {
+        this.#busy = false;
+        this.#listening = false;
+        this.#ui.setListening(false, false);
+        this.#publishActive(recognizer);
+      }
       return;
     }
 
@@ -430,11 +638,11 @@ class App {
     try {
       // A user gesture is on the stack here, so the metronome's AudioContext
       // (and the library's) can legally start.
-      await tuninator.start();
-      this.#listening = tuninator.getState() === "listening";
+      await recognizer.start();
+      this.#listening = recognizer.getState() === "listening";
     } catch (cause) {
-      const error = toTuninatorError(cause);
-      this.#probe.lastError = error;
+      const error = toRecognizerError(cause);
+      this.#probe.lastError = { code: error.code, message: error.message };
       this.#ui.setError(error);
       this.#ui.setStatus(`Could not start: ${error.message}`);
       this.#listening = false;
@@ -444,26 +652,13 @@ class App {
     }
   }
 
-  #setMode(mode: TuninatorMode): void {
-    this.#settings.mode = mode;
-    try {
-      // Documented as safe while listening, and never restarting the graph.
-      this.#tuninator?.setMode(mode);
-      this.#ui.logNote(`mode → ${mode}`);
-    } catch (cause) {
-      const error = toTuninatorError(cause);
-      this.#ui.setError(error);
-    }
-    this.#ui.setMode(this.#tuninator?.getMode() ?? mode);
-  }
-
   async #setSource(choice: SourceChoice): Promise<void> {
     const wasListening = this.#listening;
     this.#settings.source = choice;
     this.#ui.setError(null);
     this.#timeline.clear();
     this.#ui.clearLog();
-    this.#ui.setActiveEvents([]);
+    this.#ui.setActiveNotes([], 0);
     this.#build(choice);
     if (wasListening) await this.#toggleListen();
   }
@@ -477,11 +672,26 @@ class App {
 
   #installGlobalErrorHandlers(): void {
     window.addEventListener("error", (event) => {
-      this.#ui.setError(toTuninatorError(event.error ?? event.message));
+      this.#ui.setError(toRecognizerError(event.error ?? event.message));
     });
     window.addEventListener("unhandledrejection", (event) => {
-      this.#ui.setError(toTuninatorError(event.reason));
+      this.#ui.setError(toRecognizerError(event.reason));
       event.preventDefault();
+    });
+  }
+
+  /**
+   * `dispose()` is new in 0.2 and is the only thing that releases the
+   * microphone. Without this the recording indicator can outlive the page in a
+   * bfcache'd tab. `pagehide` fires in cases `beforeunload` does not.
+   */
+  #installUnloadHandler(): void {
+    window.addEventListener("pagehide", (event) => {
+      void this.#recognizer?.dispose().catch(() => {});
+      // The recognizer never closes a context it did not create, so the page
+      // closes its own -- but only when the page is really going away.
+      // `persisted` means bfcache, where the document may come back.
+      if (!event.persisted) void this.#audioContext?.close().catch(() => {});
     });
   }
 }
@@ -502,7 +712,7 @@ function boot(): void {
     window.__tuninatorDemo = app.probe;
   } catch (cause) {
     // The UI itself failed to construct; there is no banner to render into.
-    const error = toTuninatorError(cause);
+    const error = toRecognizerError(cause);
     const fallback = document.createElement("pre");
     // Literal rather than tokenised on purpose: this path runs when the UI
     // failed to construct, which may mean the stylesheet never applied, so it

@@ -5,10 +5,13 @@
  * against the MOCK source (no microphone, no permission prompt) and asserts that
  *
  *   1. the page loads with no console errors and no page errors,
- *   2. both library streams actually flowed (pitchFrames + music events),
- *   3. the canvas really painted -- verified by reading pixels back, not by
+ *   2. both library streams actually flowed (pitchFrames + the Note lifecycle),
+ *   3. at least one Note reached `lifecycle === "resolved"` and at least one
+ *      BLOOMED -- gained `harmony` after it had already started, which is the
+ *      behaviour the 0.2 model exists for,
+ *   4. the canvas really painted -- verified by reading pixels back, not by
  *      trusting that the element exists,
- *   4. the event log filled with note starts and ends,
+ *   5. the note log filled with starts and ends,
  *
  * then saves `screenshot.png` in the repo root as visual evidence.
  *
@@ -75,6 +78,18 @@ function check(label, ok, detail = "") {
   const line = `${ok ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`;
   console.log(line);
   if (!ok) failures.push(label);
+}
+
+/**
+ * Something observed that is neither a pass nor a failure of this repo.
+ *
+ * Used where the library stopped supplying something the demo can display but
+ * never promised (both per-channel `PitchFrame` fields are optional). Printing
+ * it keeps the observation in the run output instead of turning a check
+ * vacuous — a check that cannot fail is worse than no check at all.
+ */
+function note(label, detail = "") {
+  console.log(`NOTE  ${label}${detail ? ` — ${detail}` : ""}`);
 }
 
 /**
@@ -186,10 +201,13 @@ function readChannelPanel(page) {
 async function runStereoChannelCheck(page) {
   await listenWithShim(page, "shim=silent-ch0");
 
+  // 0.2 asks for `channelCount: { ideal: 2 }` rather than a bare 2, so a
+  // genuinely mono microphone still opens instead of being over-constrained.
   const constraints = await page.evaluate(() => window.__stereoShim?.constraints ?? null);
+  const requested = constraints?.audio?.channelCount;
   check(
     "stereo: getUserMedia was asked for 2 channels",
-    constraints?.audio?.channelCount === 2,
+    requested === 2 || requested?.ideal === 2,
     JSON.stringify(constraints?.audio ?? null)
   );
 
@@ -209,19 +227,31 @@ async function runStereoChannelCheck(page) {
     `frames=${probe?.frames}`
   );
 
-  // Automatic selection: the only channel carrying signal is the one it must
-  // settle on, and it must SAY so -- `channelRms` cannot answer this, because
-  // selection is hysteretic and the loudest channel in a given frame is
-  // routinely not the selected one.
-  check(
-    "stereo: selection latched onto the channel carrying the instrument",
-    probe?.selectedChannel === 1,
-    `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`
-  );
-
-  // The diagnostic half: the demo has to make "channel 0 is dead" visible,
-  // because that is the difference between a wiring mistake and a broken app.
+  // `PitchFrame.channelRms` / `.selectedChannel` are optional, and 0.2's browser
+  // adapter does not populate either: the capture worklet measures them and
+  // `BrowserRecognizer` drops them on the way to the engine. So which channel
+  // was selected can no longer be asserted from here -- the check above, that
+  // the tone is detected at all, is what still proves selection happened.
+  // Reported rather than checked, because a demo cannot fix a library.
   const channels = await readChannelPanel(page);
+  if (probe?.channelRms === undefined) {
+    note(
+      "stereo: per-channel diagnostics are not reported by this library revision",
+      `channelRms=${JSON.stringify(probe?.channelRms)} ` +
+        `selectedChannel=${JSON.stringify(probe?.selectedChannel)} ` +
+        `panel="${channels.note}"`
+    );
+    check(
+      "stereo: the demo says so rather than drawing an empty meter",
+      channels.count === 0 && channels.note.includes("not reported"),
+      `${channels.count} rows, note="${channels.note}"`
+    );
+    return;
+  }
+
+  // The diagnostic half, for a library revision that does report them: the demo
+  // has to make "channel 0 is dead" visible, because that is the difference
+  // between a wiring mistake and a broken app.
   check(
     "stereo: the demo shows both input channels",
     channels.count === 2,
@@ -253,6 +283,11 @@ async function runStereoChannelCheck(page) {
  *
  * If summing ever stops failing here the first check is what says so, rather
  * than the suite quietly passing on a claim it no longer tests.
+ *
+ * Both are read off the pitch readout. 0.2 stopped delivering
+ * `PitchFrame.selectedChannel`, so the two results *differing* is now the only
+ * evidence that `auto` is not summing -- which is why neither half may be
+ * dropped for being redundant with the other.
  */
 async function runCombFilterCheck(page) {
   const E3 = 164.81;
@@ -264,12 +299,6 @@ async function runCombFilterCheck(page) {
 
   await listenWithShim(page, "shim=comb&channels=sum");
   const summed = await readPitch();
-  const summedProbe = await page.evaluate(() => window.__tuninatorDemo ?? null);
-  check(
-    "comb: `channels=sum` really does sum",
-    summedProbe?.selectedChannel === null,
-    `selectedChannel=${JSON.stringify(summedProbe?.selectedChannel)}`
-  );
   check(
     "comb: summing a DI and a 3ms-delayed mic of one guitar reads an octave high",
     Number.isFinite(summed.hz) && summed.hz > E3 * 1.8,
@@ -278,25 +307,27 @@ async function runCombFilterCheck(page) {
 
   await listenWithShim(page, "shim=comb");
   const selected = await readPitch();
-  const probe = await page.evaluate(() => window.__tuninatorDemo ?? null);
   check(
-    "comb: selection picks a single channel instead of summing",
-    typeof probe?.selectedChannel === "number",
-    `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`
-  );
-  check(
-    "comb: the selected channel is detected as E3, not the octave",
+    "comb: the default `auto` reads E3, not the octave summing produces",
     selected.note === "E" && Math.abs(selected.hz - E3) < 4,
     `${selected.note} @ ${selected.hz}Hz`
   );
 
-  const channels = await readChannelPanel(page);
-  check(
-    "comb: the demo names the channel it settled on",
-    channels.selected.filter((value) => value === "yes").length === 1 &&
-      /listening to ch\d/.test(channels.note),
-    `selected=[${channels.selected}] note="${channels.note}"`
-  );
+  // The pair above is the whole claim, and it is now carried entirely by the
+  // pitch readout: `selectedChannel` would have said which channel won, but 0.2
+  // does not deliver it (see runStereoChannelCheck). The two results differing
+  // is what proves `auto` is not summing.
+  const probe = await page.evaluate(() => window.__tuninatorDemo ?? null);
+  if (probe?.selectedChannel === undefined) {
+    note("comb: the library did not name the channel it settled on",
+      `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`);
+  } else {
+    check(
+      "comb: selection picks a single channel instead of summing",
+      typeof probe.selectedChannel === "number",
+      `selectedChannel=${JSON.stringify(probe.selectedChannel)}`
+    );
+  }
 }
 
 async function main() {
@@ -374,12 +405,39 @@ async function main() {
     // --- streams actually flowed -------------------------------------------
     const probe = await page.evaluate(() => window.__tuninatorDemo ?? null);
     check("pitchFrame stream flowed", (probe?.frames ?? 0) > 100, `frames=${probe?.frames}`);
+    check("notes started", (probe?.notesStarted ?? 0) >= 8, `started=${probe?.notesStarted}`);
+    check("notes changed", (probe?.notesChanged ?? 0) >= 8, `changed=${probe?.notesChanged}`);
     check(
-      "music events started",
-      (probe?.eventsStarted ?? 0) >= 8,
-      `started=${probe?.eventsStarted}`
+      "notes resolved",
+      (probe?.notesResolved ?? 0) >= 4,
+      `resolved=${probe?.notesResolved}`
     );
-    check("music events ended", (probe?.eventsEnded ?? 0) >= 6, `ended=${probe?.eventsEnded}`);
+    check("notes ended", (probe?.notesEnded ?? 0) >= 6, `ended=${probe?.notesEnded}`);
+    // `noteResolved` firing is not the same claim as the Note it carried having
+    // settled; assert the delivered lifecycle, not just the event count.
+    check(
+      "a Note reached lifecycle `resolved`",
+      probe?.sawResolvedLifecycle === true,
+      `sawResolvedLifecycle=${probe?.sawResolvedLifecycle}`
+    );
+    // The headline 0.2 behaviour: a Note that started as a single pitch and
+    // acquired `harmony` later, via `harmonyEnrichment`. A demo that only ever
+    // showed final chord names would pass everything above and still be wrong.
+    check(
+      "a Note bloomed into a chord after it had started",
+      (probe?.notesBloomed ?? 0) >= 1,
+      `bloomed=${probe?.notesBloomed}`
+    );
+    check(
+      "a correction carried its previous reading",
+      (probe?.corrections ?? 0) >= 1,
+      `corrections=${probe?.corrections}`
+    );
+    check(
+      "getTimebase() reported a sample rate",
+      typeof probe?.timebase?.sampleRate === "number" && probe.timebase.sampleRate > 0,
+      JSON.stringify(probe?.timebase)
+    );
     check("no library error surfaced", probe?.lastError == null, JSON.stringify(probe?.lastError));
 
     // --- the canvas really painted -----------------------------------------
@@ -442,7 +500,11 @@ async function main() {
 
     // --- panels populated ---------------------------------------------------
     const logLines = await page.locator("#event-log .log-line").count();
-    check("event log filled", logLines >= 8, `${logLines} lines`);
+    check("note log filled", logLines >= 8, `${logLines} lines`);
+
+    const changeLines = await page.locator('#event-log .log-line[data-phase="change"]').count();
+    check("note log shows revisions, not just starts and ends", changeLines >= 1,
+      `${changeLines} change lines`);
 
     const frequencyText = await page.locator("#frequency-value").innerText();
     check("frequency readout is live", /\d/.test(frequencyText), frequencyText);
@@ -450,12 +512,40 @@ async function main() {
     const noteText = await page.locator("#note-name").innerText();
     check("note readout is live", noteText.trim() !== "" && noteText.trim() !== "—", noteText);
 
-    // --- setMode() while listening -----------------------------------------
-    await page.selectOption("#mode-select", "chords");
-    await page.waitForTimeout(600);
-    const stillListening =
-      (await page.locator("#state-pill").innerText()).trim() === "listening";
-    check("setMode() works while listening", stillListening);
+    const timebaseText = (await page.locator("#timebase-value").innerText()).trim();
+    check("timebase readout is populated", /\d/.test(timebaseText), timebaseText);
+
+    // The per-channel meters are asserted here, on the mock, because the mock is
+    // the source that still supplies `PitchFrame.channelRms`. The live path's
+    // version of this check is in runStereoChannelCheck.
+    const mockChannels = await readChannelPanel(page);
+    check(
+      "per-channel meters render from PitchFrame.channelRms",
+      mockChannels.count === 2 && /2 ch/.test(mockChannels.note),
+      `${mockChannels.count} rows, note="${mockChannels.note}"`
+    );
+
+    // --- the hypothesis trail ----------------------------------------------
+    // The most visible new capability in 0.2. Rendering it is what lets a
+    // player who disagrees with the answer see what else was considered.
+    //
+    // Waited for rather than sampled: the panel only holds Notes that are
+    // currently sounding, so a single read lands wherever the phrase happens to
+    // be and would assert the score's timing rather than the UI.
+    const sawTrail = await page
+      .waitForFunction(
+        () => document.querySelectorAll("#active-events .event-alt.trail").length > 0,
+        undefined,
+        { timeout: 8000 }
+      )
+      .then(() => true, () => false);
+    check("active Notes show what was ruled out", sawTrail);
+
+    // --- modes are gone -----------------------------------------------------
+    // 0.2 deleted them outright, so a mode control reappearing is a regression,
+    // not a feature. Asserted rather than merely deleted from this file.
+    const modeControls = await page.locator("#mode-select").count();
+    check("no mode selector survives", modeControls === 0, `${modeControls} found`);
 
     // --- error surface ------------------------------------------------------
     await page.goto(`${ORIGIN}/?mock=1&failWith=mic-permission-denied`, { waitUntil: "load" });
@@ -499,6 +589,15 @@ async function main() {
         "live: real library emitted pitch frames",
         (liveProbe?.frames ?? 0) > 50,
         `frames=${liveProbe?.frames}`
+      );
+      // The demo shares its AudioContext with the library, so `getTimebase()`
+      // carries an `originContextTime` and the timeline is pinned to the audio
+      // clock rather than estimating the offset from arrival times.
+      check(
+        "live: getTimebase() related source time to the shared AudioContext",
+        typeof liveProbe?.timebase?.originContextTime === "number" &&
+          liveProbe?.timebaseAnchored === true,
+        `timebase=${JSON.stringify(liveProbe?.timebase)} anchored=${liveProbe?.timebaseAnchored}`
       );
 
       await installMediaShim(page);

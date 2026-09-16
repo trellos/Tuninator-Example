@@ -13,13 +13,14 @@
     "exactOptionalPropertyTypes": false,
 
     /*
-     * `noUnusedLocals` / `noUnusedParameters` are deliberately OFF.
-     * `paths` below puts the library's own source into this program, and
-     * TypeScript has no way to apply compiler options per file -- so those two
-     * flags would fail this demo's build on unused-variable style in the
-     * library's in-progress code, which this repo does not own and must not
-     * edit. Every flag that is on is a type-safety flag, not a style flag.
+     * These were off while the library's own source was pulled into this
+     * program by a `paths` entry -- compiler options cannot be applied per
+     * file, so they failed this demo's build on style in code it does not own.
+     * `tuninator` is a published dependency now, so only this repo's own source
+     * is in the program and they can be on.
      */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
 
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
@@ -27,18 +28,7 @@
     "resolveJsonModule": true,
     "noEmit": true,
 
-    "types": ["node", "vite/client"],
-
-    /*
-     * The library's `dist/` is built concurrently and may not exist yet, so the
-     * demo typechecks (and bundles, see vite.config.ts) against the library's
-     * PUBLIC ENTRY POINT source. This is the single permitted exception to the
-     * "public API only" rule -- `src/index.ts` *is* the public API. Nothing in
-     * this demo may deepen this path into `tuninator/src/**` internals.
-     */
-    "paths": {
-      "tuninator": ["../Tuninator/src/index.ts"]
-    }
+    "types": ["node", "vite/client"]
   },
   "include": ["src", "vite.config.ts"]
 }

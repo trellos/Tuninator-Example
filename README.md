@@ -24,29 +24,14 @@ npm install
 npm run dev          # http://localhost:5173
 ```
 
-The library is a sibling checkout, declared as `"tuninator": "file:../Tuninator"`, so the layout is:
-
-```
-parent/
-├── Tuninator/          # the library
-└── Tuninator-Example/  # this repo
-```
-
-**The library must be on a revision that has the 0.2 recognizer API.** At time of writing that is
-its `claude/guitar-event-recognizer-refactor-t5g5yr` branch — the library's `main` is still 0.1, and
-this demo does not compile against it:
-
-```bash
-git clone https://github.com/trellos/Tuninator ../Tuninator
-cd ../Tuninator
-git checkout claude/guitar-event-recognizer-refactor-t5g5yr
-npm install && npm run build        # emits dist/tuninator-worklet.js
-cd ../Tuninator-Example && npm install
-```
+That is the whole setup. The library is an ordinary npm dependency —
+[`tuninator`](https://www.npmjs.com/package/tuninator), declared as `"tuninator": "^0.2.0"` — so
+there is no sibling checkout to clone and no library build to run first. `npm install` brings in the
+package's prebuilt `dist/`, including the AudioWorklet asset the live path needs.
 
 | script | what it does |
 | --- | --- |
-| `npm run dev` | Vite dev server with HMR, including changes to the library's source |
+| `npm run dev` | Vite dev server with HMR |
 | `npm run build` | `tsc --noEmit` then `vite build` |
 | `npm run typecheck` | typecheck only |
 | `npm run preview` | serve the production build |
@@ -84,41 +69,16 @@ outright, and the recognizer decides.
 The library needs a `workletUrl` pointing at its built AudioWorklet bundle. This demo passes
 `/assets/tuninator-worklet.js`.
 
-**That file is a copy of the library's `dist/tuninator-worklet.js`.** It is not authored here and it
-is not committed — `.gitignore` excludes it, and `public/assets/.gitkeep` keeps the directory. The
-copy is automatic: `vite.config.ts` installs a small plugin that copies
-`../Tuninator/dist/tuninator-worklet.js` into `public/assets/` on every build and dev-server start,
-and re-copies it whenever the library is rebuilt while the dev server is running.
+**That file is a copy of the package's own `dist/tuninator-worklet.js`.** It is not authored here and
+it is not committed — `.gitignore` excludes it, and `public/assets/.gitkeep` keeps the directory. The
+copy is automatic: `vite.config.ts` installs a small plugin that resolves `tuninator/worklet` through
+the package's `exports` map and copies it into `public/assets/` on every build and dev-server start.
 
-So the ordinary workflow is:
+It is copied rather than imported because an AudioWorklet is fetched by URL at runtime — the bundler
+never sees it as a module, so it has to exist as a served file.
 
-```bash
-cd ../Tuninator && npm run build   # produces dist/tuninator-worklet.js
-cd ../Tuninator-Example && npm run dev
-```
-
-If the library has not been built yet, the copy step **warns and continues** rather than failing the
-build. The demo still runs against the mock; the live path then reports `worklet-load-failed` in the
-UI, which is the correct and legible outcome rather than a crash.
-
-## Building against the library's source
-
-`vite.config.ts` aliases `tuninator` to `../Tuninator/src/index.ts`, and `tsconfig.json` mirrors that
-with a `paths` entry.
-
-This exists because the library's `dist/` is produced by a concurrent workstream and may not exist
-when you clone. Resolving the package through its `exports` map (`./dist/index.js`) would fail; the
-alias keeps the demo building today and gives live reload on library changes.
-
-`src/index.ts` **is** the library's public entry point, so this is not a way around the public API —
-it is the public API, in source form. The rule the demo holds itself to is that this alias is the
-only path into the library and no import ever deepens into `tuninator/src/**`.
-
-> One consequence worth knowing: `tsconfig.json` deliberately leaves `noUnusedLocals` and
-> `noUnusedParameters` off. The `paths` entry puts the library's own source into this TypeScript
-> program, and compiler options cannot be applied per file — so those two *style* flags would fail
-> this repo's build on unused variables in library code it does not own. Every flag that is on is a
-> type-safety flag.
+Since the worklet ships inside the published package, a missing one means the dependency is not
+installed, and the config fails loudly rather than degrading. `npm install` is the fix.
 
 ---
 
@@ -220,11 +180,11 @@ into internals; each is handled defensively in the demo instead.
    it with `engine-load-failed` — deliberately, and the error says so. The demo uses the default
    inline host and carries banner copy for the code anyway.
 
-3. **The library's default `workletUrl` does not survive bundling.** It resolves
-   `new URL("./tuninator-worklet.js", import.meta.url)`, which is correct when consuming the
-   unbundled `dist/index.js` but points at a non-existent sibling of the output chunk when the
-   library is bundled from source — Vite warns about exactly this at build time. The demo always
-   passes an explicit `workletUrl`, so it is unaffected.
+3. **There is no useful default `workletUrl`.** The library falls back to the bare relative
+   specifier `./tuninator-worklet.js`, which `addModule()` resolves against **the page's** URL, not
+   the package's — so it only ever works by accident. Every consumer has to copy the asset out of
+   the package and pass an explicit URL, which is what `vite.config.ts` and `src/main.ts` do here,
+   and what the library's own `docs/API.md` tells you to do.
 
 4. **No exported frequency↔note helper.** `src/pitch.ts` carries the demo's own, shared by the
    timeline (placing a `DetectedPitch` vertically) and the mock (synthesising one).

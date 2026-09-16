@@ -27,38 +27,28 @@ It is one screen, no routing, no framework. Deployed to GitHub Pages at
 
 ---
 
-## The one thing that will trip you up first
+## How the library gets here
 
-**The demo does not build without a sibling checkout of the library.**
+`tuninator` is an **ordinary npm dependency** — `"tuninator": "^0.2.0"` in `package.json`, resolved
+from the public registry, pinned by `package-lock.json`. There is no sibling checkout, no alias, no
+`paths` entry and no library build step. `npm ci && npm run dev` is the whole setup, locally and in
+CI alike.
 
-`package.json` declares `"tuninator": "file:../Tuninator"` and `vite.config.ts` aliases the import to
-`../Tuninator/src/index.ts`. The package is **not published to npm**. `src/main.ts` imports
-`createRecognizer` and `RecognizerError` as *values*, so `?mock=1` does not rescue a missing library
-— Vite fails to resolve the module before any query parameter is read.
+Two consequences worth holding on to:
 
-```
-parent/
-├── Tuninator/          <- the library, MUST be named exactly this
-└── Tuninator-Example/  <- this repo
-```
+- **The demo's imports go through the package's `exports` map.** `src/main.ts` imports
+  `createRecognizer` and `RecognizerError` from `"tuninator"`, and nothing may deepen that into
+  `tuninator/dist/**` or a source path. The one non-`.` subpath used anywhere is
+  `tuninator/worklet`, in `vite.config.ts` — a documented export, used to locate the asset file to
+  copy, never imported as a module.
+- **A library change reaches this repo through a version bump, not a rebuild.** If you need
+  behaviour that is not in the released package yet, the fix is a release of the library and a bump
+  here — not an alias back to a local checkout. `npm run typecheck` failing right after a bump means
+  the API moved; check the package's `CHANGELOG.md`, which ships in `node_modules/tuninator/`.
 
-```bash
-git clone https://github.com/trellos/Tuninator ../Tuninator
-cd ../Tuninator
-# The 0.2 recognizer API is not on the library's main yet. This demo does not
-# compile against main; see the deployment section on LIBRARY_REF.
-git checkout claude/guitar-event-recognizer-refactor-t5g5yr
-npm ci && npm run build                      # emits dist/tuninator-worklet.js
-cd ../Tuninator-Example && npm ci
-```
-
-The directory name is load-bearing: `vite.config.ts` does `path.resolve(here, "..", "Tuninator")`.
-CI does the same thing — see `.github/workflows/deploy-pages.yml`, which checks out the library at
-`LIBRARY_REF` into a sibling path.
-
-**When a typecheck fails right after pulling, suspect the library first.** The demo tracks the
-library's `main`, and new demo features routinely land against library APIs that a stale local
-checkout does not have. Update and rebuild `../Tuninator` before assuming your change is at fault.
+This repo therefore typechecks only its own source, which is why `noUnusedLocals` and
+`noUnusedParameters` are on in `tsconfig.json`. They were off only while the library's in-progress
+source was being pulled into this TypeScript program.
 
 ---
 
@@ -231,20 +221,9 @@ context is a silent recognizer, not an error, so nothing would surface the failu
 `workflow_dispatch`. **There is no `pull_request` trigger** — a PR against this repo shows no checks,
 which is expected, not a stuck build. Local `npm run smoke:live` is the evidence for a PR.
 
-`LIBRARY_REF` pins which library revision CI builds against. It is currently a **commit SHA** on the
-library's `claude/guitar-event-recognizer-refactor-t5g5yr` branch, because the 0.2 recognizer API
-this demo targets is not on the library's `main` yet — the demo does not compile against `main`.
-
-A SHA rather than the branch name on purpose: a feature branch works right up until it is deleted by
-its own merge, and then fails opaquely. Tracking `main` is still the steady state — **move it back
-the moment the library's rewrite lands there.**
-
-### Known benign build output
-
-Vite may log `new URL("./tuninator-worklet.js", import.meta.url) doesn't exist at build time`. This
-is a plain log line, not a run annotation. It comes from the *library's* default `workletUrl`, and
-the demo always passes an explicit one, so it is a branch this build never takes. Fixing it properly
-requires a change in the library repo, not here.
+The workflow checks out this repo, runs `npm ci` and builds. Which library version it runs against
+is decided by `package-lock.json`, the same as locally — there is no `LIBRARY_REF` input to keep in
+sync any more, and no second checkout.
 
 ---
 

@@ -4,6 +4,9 @@
  * Builds the demo, serves it with `vite preview`, drives it in headless Chromium
  * against the MOCK source (no microphone, no permission prompt) and asserts that
  *
+ *   0. the page reaches `listening` on its own — there is no transport control
+ *      to click, so every scenario below navigates and waits rather than
+ *      pressing anything,
  *   1. the page loads with no console errors and no page errors,
  *   2. both library streams actually flowed (pitchFrames + the Note lifecycle),
  *   3. at least one Note reached `lifecycle === "resolved"` and at least one
@@ -159,7 +162,6 @@ async function installMediaShim(page) {
 /** Starts the demo's REAL live path against the shim and waits for `listening`. */
 async function listenWithShim(page, query) {
   await page.goto(`${ORIGIN}/?mock=0&${query}`, { waitUntil: "load" });
-  await page.click("#listen-btn");
   await page.waitForFunction(
     () => document.getElementById("state-pill")?.textContent === "listening",
     undefined,
@@ -225,26 +227,19 @@ async function runStereoChannelCheck(page) {
     `frames=${probe?.frames}`
   );
 
-  // `PitchFrame.channelRms` / `.selectedChannel` are optional, and 0.2's browser
-  // adapter populates neither: the capture worklet measures them and
-  // `BrowserRecognizer` drops them on the way to the engine. So which channel
-  // was selected cannot be asserted from here -- the check above, that the tone
-  // is detected at all, is what still proves selection happened.
+  // There used to be a check here asserting the demo said "not reported by
+  // this source", back when the browser adapter dropped `channelRms` and
+  // `selectedChannel` on the way to the engine. The library forwards both now,
+  // so the empty state it asserted is unreachable and the check only ever
+  // reported that the library had improved. The mock-path check covers
+  // rendering the meters; `readChannelPanel` is what it reads them with.
   //
-  // Reported rather than checked, because a demo cannot fix a library. The
-  // demo's job is to say so rather than draw an empty meter, and that IS
-  // checked. If a later revision starts forwarding the fields, the mock-path
-  // check already covers rendering them.
-  const channels = await readChannelPanel(page);
+  // Do not re-add it. An assertion that a gap still exists fails the moment the
+  // gap closes, which is the one outcome nobody needs to be told about twice.
   note(
-    "stereo: per-channel diagnostics are not reported by this library revision",
+    "stereo: per-channel diagnostics as delivered by this library revision",
     `channelRms=${JSON.stringify(probe?.channelRms)} ` +
       `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`
-  );
-  check(
-    "stereo: the demo says the channels are unreported rather than drawing an empty meter",
-    channels.count === 0 && channels.note.includes("not reported"),
-    `${channels.count} rows, note="${channels.note}"`
   );
 }
 
@@ -292,13 +287,15 @@ async function runCombFilterCheck(page) {
     `${selected.note} @ ${selected.hz}Hz`
   );
 
-  // The pair above is the whole claim, and it is now carried entirely by the
-  // pitch readout: `selectedChannel` would have said which channel won, but 0.2
-  // does not deliver it (see runStereoChannelCheck). The two results differing
-  // is what proves `auto` is not summing.
+  // The pair above is the whole claim, and it is carried by the pitch readout
+  // rather than by `selectedChannel`. The library does name the channel it
+  // settled on now, but naming one is not evidence it picked the right one --
+  // only the two results differing proves `auto` is not summing. Reported for
+  // the record; deliberately not asserted, since which channel wins here is the
+  // library's call and either would be defensible.
   const probe = await page.evaluate(() => window.__tuninatorDemo ?? null);
   note(
-    "comb: the library did not name the channel it settled on",
+    "comb: the channel the library settled on",
     `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`
   );
 }
@@ -359,12 +356,18 @@ async function main() {
     await page.waitForSelector("#timeline-canvas");
 
     check("page has a canvas", (await page.locator("#timeline-canvas").count()) === 1);
+    // The source badge is gone: it claimed "live microphone" when all it knew
+    // was which recognizer this page built. Its replacement asserts that from
+    // the probe rather than from any copy on screen -- `#source-select` only
+    // says what was *asked* for, and the whole complaint about the badge was
+    // that a label is not evidence.
+    const sourceProbe = await page.evaluate(() => window.__tuninatorDemo?.source ?? null);
     check(
-      "source badge reports the mock",
-      (await page.locator("#source-badge").innerText()).includes("mock")
+      "the mock recognizer is the one actually running",
+      sourceProbe === "mock",
+      `source=${sourceProbe}`
     );
 
-    await page.click("#listen-btn");
     await page.waitForFunction(
       () => document.getElementById("state-pill")?.textContent === "listening",
       undefined,
@@ -520,9 +523,22 @@ async function main() {
     const modeControls = await page.locator("#mode-select").count();
     check("no mode selector survives", modeControls === 0, `${modeControls} found`);
 
+    // --- there is no transport ----------------------------------------------
+    // The page listens because it is open. Every `listening` assertion above is
+    // already reached without a click, which is the real evidence; this is what
+    // says a start/stop button reappearing is a regression rather than an
+    // addition. The gesture prompt is asserted hidden too: headless Chromium
+    // runs with --autoplay-policy=no-user-gesture-required, so the escape hatch
+    // must never have been needed.
+    const transportControls = await page.locator("#listen-btn").count();
+    check("no start/stop control survives", transportControls === 0, `${transportControls} found`);
+    check(
+      "the autoplay escape hatch stayed hidden",
+      await page.locator("#gesture-prompt").isHidden()
+    );
+
     // --- error surface ------------------------------------------------------
     await page.goto(`${ORIGIN}/?mock=1&failWith=mic-permission-denied`, { waitUntil: "load" });
-    await page.click("#listen-btn");
     await page.waitForSelector("#error-banner:not([hidden])", { timeout: 10_000 });
     const errorCode = (await page.locator("#error-code").innerText()).trim();
     const errorTitle = (await page.locator("#error-title").innerText()).trim();
@@ -539,7 +555,6 @@ async function main() {
       await page.goto(`${ORIGIN}/?mock=0&workletUrl=/definitely-not-here.js`, {
         waitUntil: "load",
       });
-      await page.click("#listen-btn");
       await page.waitForSelector("#error-banner:not([hidden])", { timeout: 15_000 });
       const workletCode = (await page.locator("#error-code").innerText()).trim();
       check(
@@ -549,7 +564,6 @@ async function main() {
       );
 
       await page.goto(`${ORIGIN}/?mock=0`, { waitUntil: "load" });
-      await page.click("#listen-btn");
       await page.waitForFunction(
         () => document.getElementById("state-pill")?.textContent === "listening",
         undefined,
@@ -580,7 +594,6 @@ async function main() {
 
     // --- screenshot: back to the good path, one full phrase on screen -------
     await page.goto(`${ORIGIN}/?mock=1&metronome=1`, { waitUntil: "load" });
-    await page.click("#listen-btn");
     await page.waitForTimeout(OBSERVE_MS);
     const shot = path.join(root, "screenshot.png");
     await page.screenshot({ path: shot, fullPage: true });

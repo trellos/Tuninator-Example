@@ -23,7 +23,12 @@
           <h1>Tuninator</h1>
           <p>guitar analysis in the browser — Notes that improve as evidence arrives</p>
         </div>
-        <span class="badge" id="source-badge" data-kind="mock">mock input</span>
+        <!-- There is no source badge. It read "live microphone", which sounded
+             like a claim about the capture device, but all it ever mirrored was
+             which recognizer this page constructed — something the Source
+             select in the toolbar already says, and the only thing the page
+             gets to choose. Which device the browser actually opens is the
+             browser's business, not this page's. -->
       </header>
 
       <!-- Decorative status strip. Static text only: the live values it mirrors
@@ -36,7 +41,11 @@
       </div>
 
       <section class="toolbar" aria-label="Transport">
-        <button id="listen-btn" class="btn primary" type="button">Start listening</button>
+        <!-- There is no start/stop control. The page listens for as long as it
+             is open: the recognizer starts on load and is only stopped by
+             switching source or leaving. A browser that will not open the
+             microphone without a gesture is handled by #gesture-prompt below,
+             which is the one case a click is still required. -->
         <button id="metronome-btn" class="btn" type="button">Metronome off · 90 bpm</button>
         <label class="check">
           <input type="checkbox" id="metronome-mute" />
@@ -68,6 +77,22 @@
         <p class="error-message" id="error-message"></p>
         <p class="error-hint" id="error-hint"></p>
       </div>
+
+      <!--
+        The autoplay policy's escape hatch, and the only reason a click survives
+        anywhere in this page.
+
+        Starting on load is what the demo wants, but a browser may refuse to
+        resume an AudioContext (or to open the microphone) outside a user
+        gesture, and there is no way to ask in advance whether it will. So the
+        page tries first and only reveals this if the attempt was actually
+        refused — a button that is never shown on a browser that lets the page
+        start by itself. Any click or key anywhere re-arms the start; this is
+        just the visible way to say so.
+      -->
+      <button id="gesture-prompt" class="gesture-prompt btn primary" type="button" hidden>
+        Click to allow audio
+      </button>
 
       <section class="status-bar" aria-label="Status">
         <span class="pill" id="state-pill" data-state="idle">idle</span>

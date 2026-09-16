@@ -25,10 +25,11 @@ import type { MetronomeStatus } from "./metronome.js";
 export type SourceChoice = "auto" | "mock" | "live";
 
 export type UiCallbacks = {
-  onToggleListen: () => void;
   onSourceChange: (source: SourceChoice) => void;
   onToggleMetronome: () => void;
   onMuteChange: (muted: boolean) => void;
+  /** The gesture prompt was clicked: a user gesture is on the stack, retry. */
+  onGesture: () => void;
 };
 
 const LOG_LIMIT = 150;
@@ -42,18 +43,18 @@ const HYPOTHESIS_LIMIT = 4;
 const ERROR_COPY: Record<RecognizerErrorCode, { title: string; hint: string }> = {
   "mic-unavailable": {
     title: "No microphone found",
-    hint: "Plug in or enable an input device, then press Start again.",
+    hint: "Plug in or enable an input device, then reload the page.",
   },
   "mic-permission-denied": {
     title: "Microphone access was denied",
     hint:
       "The browser blocked microphone access. Allow it for this site " +
-      "(the padlock icon in the address bar), then press Start again. " +
+      "(the padlock icon in the address bar), then reload the page. " +
       "You can explore the demo without a microphone using the mock source.",
   },
   "audio-context-failed": {
     title: "Audio could not be started",
-    hint: "The browser refused to create an AudioContext. Reload the page and press Start.",
+    hint: "The browser refused to create an AudioContext. Reload the page.",
   },
   "worklet-unavailable": {
     title: "AudioWorklet is not supported",
@@ -141,12 +142,11 @@ function describeHypothesis(hypothesis: Hypothesis): string {
 export class Ui {
   readonly canvas: HTMLCanvasElement;
 
-  #listenBtn: HTMLButtonElement;
+  #gesturePrompt: HTMLButtonElement;
   #sourceSelect: HTMLSelectElement;
   #metronomeBtn: HTMLButtonElement;
   #muteCheckbox: HTMLInputElement;
 
-  #sourceBadge: HTMLElement;
   #statePill: HTMLElement;
   #statusMessage: HTMLElement;
   #errorBanner: HTMLElement;
@@ -180,12 +180,11 @@ export class Ui {
   constructor(callbacks: UiCallbacks) {
     this.canvas = must<HTMLCanvasElement>("timeline-canvas");
 
-    this.#listenBtn = must<HTMLButtonElement>("listen-btn");
+    this.#gesturePrompt = must<HTMLButtonElement>("gesture-prompt");
     this.#sourceSelect = must<HTMLSelectElement>("source-select");
     this.#metronomeBtn = must<HTMLButtonElement>("metronome-btn");
     this.#muteCheckbox = must<HTMLInputElement>("metronome-mute");
 
-    this.#sourceBadge = must("source-badge");
     this.#statePill = must("state-pill");
     this.#statusMessage = must("status-message");
     this.#errorBanner = must("error-banner");
@@ -209,7 +208,7 @@ export class Ui {
     this.#activeNotes = must("active-events");
     this.#noteLog = must("event-log");
 
-    this.#listenBtn.addEventListener("click", () => callbacks.onToggleListen());
+    this.#gesturePrompt.addEventListener("click", () => callbacks.onGesture());
     this.#metronomeBtn.addEventListener("click", () => callbacks.onToggleMetronome());
     this.#muteCheckbox.addEventListener("change", () =>
       callbacks.onMuteChange(this.#muteCheckbox.checked)
@@ -221,10 +220,15 @@ export class Ui {
 
   /* ---- transport / state ---- */
 
-  setListening(listening: boolean, busy = false): void {
-    this.#listenBtn.textContent = listening ? "Stop" : "Start listening";
-    this.#listenBtn.classList.toggle("is-active", listening);
-    this.#listenBtn.disabled = busy;
+  /**
+   * Show or hide the autoplay-policy escape hatch.
+   *
+   * Hidden in the ordinary case: the page starts on load and there is nothing
+   * to click. It appears only after a start attempt was refused for want of a
+   * user gesture, and goes away again the moment one arrives.
+   */
+  setGestureNeeded(needed: boolean): void {
+    this.#gesturePrompt.hidden = !needed;
   }
 
   setState(state: RecognizerState): void {
@@ -236,10 +240,18 @@ export class Ui {
     this.#statusMessage.textContent = message;
   }
 
-  setSource(choice: SourceChoice, effective: "mock" | "live"): void {
+  /**
+   * Reflect the source back into the select.
+   *
+   * Only the *choice*, because only the choice is this page's to report. What
+   * the choice resolves to used to be shown separately, as a "live microphone"
+   * badge, which read as a statement about the capture hardware — and the page
+   * has no idea what the browser opened, or whether anything is plugged into
+   * it. The level and channel meters answer that from the signal itself, which
+   * is the only honest way to answer it.
+   */
+  setSource(choice: SourceChoice): void {
     this.#sourceSelect.value = choice;
-    this.#sourceBadge.textContent = effective === "mock" ? "mock input" : "live microphone";
-    this.#sourceBadge.dataset["kind"] = effective;
   }
 
   setMetronome(status: MetronomeStatus, bpm: number): void {

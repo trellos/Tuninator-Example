@@ -187,7 +187,7 @@ export class Timeline {
 
   #rafId: number | null = null;
   #observer: ResizeObserver | null = null;
-  #hint = "Press Start to listen.";
+  #hint = "Starting…";
   /** Cached: getComputedStyle inside the draw loop would thrash layout. */
   #theme: CanvasTheme = readTheme();
 

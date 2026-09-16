@@ -64,7 +64,15 @@ cd ../Tuninator-Example && npm install
 | `?failWith=<RecognizerErrorCode>` | make the mock's `start()` reject with that code, to exercise the error UI |
 | `?channels=auto\|sum\|<index>` | `input.channels` — which input channel(s) the library analyses. `auto` (the default) selects the loudest; `sum` is the only way to *see* a mic and a DI of one guitar comb-filter into an octave error |
 | `?metronome=1` | start the metronome on load |
-| `?autostart=1` | start listening on load |
+
+`?autostart=1` is gone, and so is the start/stop button: **the page listens for as long as it is
+open.** The recognizer starts on load and is stopped only by switching source or leaving the page.
+
+The one exception is the autoplay policy. A browser may refuse to resume an `AudioContext` before
+the page has been interacted with, so the demo tries first and — only if it was actually refused —
+reveals a "Click to allow audio" prompt. Any click or keypress anywhere re-arms the start; the
+prompt exists so a page that is visibly doing nothing can say why. On a browser that lets the page
+start by itself it is never shown.
 
 Source is switchable from the toolbar at runtime. **There is no mode selector**: 0.2 deleted modes
 outright, and the recognizer decides.

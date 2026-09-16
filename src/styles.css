@@ -192,6 +192,19 @@ body {
   color: var(--text);
 }
 
+/* The autoplay-policy escape hatch. Full width and above the status bar so a
+   page that is visibly doing nothing explains itself at a glance; `hidden`
+   until a start attempt is actually refused, which on most browsers is never. */
+.gesture-prompt {
+  display: block;
+  width: 100%;
+  text-align: center;
+}
+
+.gesture-prompt[hidden] {
+  display: none;
+}
+
 .field {
   display: inline-flex;
   align-items: center;

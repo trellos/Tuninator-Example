@@ -211,6 +211,18 @@ Debug hooks, all listed in `README.md` and surfaced in the page footer. The ones
 `?mode=` is gone with the modes themselves. The smoke suite asserts no mode selector exists, so
 re-adding one fails the run rather than quietly drifting back.
 
+`?autostart=` is gone too, because it is now unconditional: **the page listens for as long as it is
+open.** There is no start/stop control, `App` starts the recognizer from its constructor, and a
+source switch stops the old recognizer and starts the new one rather than inheriting a running
+flag. The smoke suite asserts `#listen-btn` does not exist and reaches `listening` without ever
+clicking, so re-adding a transport fails the run.
+
+The one thing that can stand in the way is the autoplay policy, and it is handled in
+`App.#audioReady()` / `App.#deferToGesture()`: the shared `AudioContext` is `resume()`d first, and
+only a context *still* suspended afterwards parks the start on the next click or keypress and
+reveals `#gesture-prompt`. Do not "simplify" this into starting unconditionally — a suspended
+context is a silent recognizer, not an error, so nothing would surface the failure.
+
 ---
 
 ## Deployment

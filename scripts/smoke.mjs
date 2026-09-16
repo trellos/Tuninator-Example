@@ -4,6 +4,9 @@
  * Builds the demo, serves it with `vite preview`, drives it in headless Chromium
  * against the MOCK source (no microphone, no permission prompt) and asserts that
  *
+ *   0. the page reaches `listening` on its own — there is no transport control
+ *      to click, so every scenario below navigates and waits rather than
+ *      pressing anything,
  *   1. the page loads with no console errors and no page errors,
  *   2. both library streams actually flowed (pitchFrames + the Note lifecycle),
  *   3. at least one Note reached `lifecycle === "resolved"` and at least one
@@ -159,7 +162,6 @@ async function installMediaShim(page) {
 /** Starts the demo's REAL live path against the shim and waits for `listening`. */
 async function listenWithShim(page, query) {
   await page.goto(`${ORIGIN}/?mock=0&${query}`, { waitUntil: "load" });
-  await page.click("#listen-btn");
   await page.waitForFunction(
     () => document.getElementById("state-pill")?.textContent === "listening",
     undefined,
@@ -364,7 +366,6 @@ async function main() {
       (await page.locator("#source-badge").innerText()).includes("mock")
     );
 
-    await page.click("#listen-btn");
     await page.waitForFunction(
       () => document.getElementById("state-pill")?.textContent === "listening",
       undefined,
@@ -520,9 +521,22 @@ async function main() {
     const modeControls = await page.locator("#mode-select").count();
     check("no mode selector survives", modeControls === 0, `${modeControls} found`);
 
+    // --- there is no transport ----------------------------------------------
+    // The page listens because it is open. Every `listening` assertion above is
+    // already reached without a click, which is the real evidence; this is what
+    // says a start/stop button reappearing is a regression rather than an
+    // addition. The gesture prompt is asserted hidden too: headless Chromium
+    // runs with --autoplay-policy=no-user-gesture-required, so the escape hatch
+    // must never have been needed.
+    const transportControls = await page.locator("#listen-btn").count();
+    check("no start/stop control survives", transportControls === 0, `${transportControls} found`);
+    check(
+      "the autoplay escape hatch stayed hidden",
+      await page.locator("#gesture-prompt").isHidden()
+    );
+
     // --- error surface ------------------------------------------------------
     await page.goto(`${ORIGIN}/?mock=1&failWith=mic-permission-denied`, { waitUntil: "load" });
-    await page.click("#listen-btn");
     await page.waitForSelector("#error-banner:not([hidden])", { timeout: 10_000 });
     const errorCode = (await page.locator("#error-code").innerText()).trim();
     const errorTitle = (await page.locator("#error-title").innerText()).trim();
@@ -539,7 +553,6 @@ async function main() {
       await page.goto(`${ORIGIN}/?mock=0&workletUrl=/definitely-not-here.js`, {
         waitUntil: "load",
       });
-      await page.click("#listen-btn");
       await page.waitForSelector("#error-banner:not([hidden])", { timeout: 15_000 });
       const workletCode = (await page.locator("#error-code").innerText()).trim();
       check(
@@ -549,7 +562,6 @@ async function main() {
       );
 
       await page.goto(`${ORIGIN}/?mock=0`, { waitUntil: "load" });
-      await page.click("#listen-btn");
       await page.waitForFunction(
         () => document.getElementById("state-pill")?.textContent === "listening",
         undefined,
@@ -580,7 +592,6 @@ async function main() {
 
     // --- screenshot: back to the good path, one full phrase on screen -------
     await page.goto(`${ORIGIN}/?mock=1&metronome=1`, { waitUntil: "load" });
-    await page.click("#listen-btn");
     await page.waitForTimeout(OBSERVE_MS);
     const shot = path.join(root, "screenshot.png");
     await page.screenshot({ path: shot, fullPage: true });

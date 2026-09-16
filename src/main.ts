@@ -199,7 +199,6 @@ type Settings = {
   source: SourceChoice;
   workletUrl: string;
   failWith: RecognizerErrorCode | null;
-  autostart: boolean;
   metronome: boolean;
   /** `input.channels`: which input channel(s) the library should analyse. */
   channels: "auto" | "sum" | number;
@@ -227,7 +226,6 @@ function readSettings(): Settings {
     source,
     workletUrl: params.get("workletUrl") ?? WORKLET_URL,
     failWith,
-    autostart: truthy(params.get("autostart")),
     metronome: truthy(params.get("metronome")),
     channels: readChannels(params.get("channels")),
   };
@@ -307,6 +305,10 @@ class App {
   #effectiveSource: "mock" | "live" = "mock";
   #listening = false;
   #busy = false;
+  /** True while a start is parked waiting for the autoplay policy's gesture. */
+  #gestureArmed = false;
+  /** Removes the document-level gesture listeners, so they cannot double-fire. */
+  #disarmGesture: (() => void) | null = null;
 
   /** Latest source time seen on any stream. Stands in for "now" in the Note model. */
   #sourceNowMs: SourceTimeMs = 0;
@@ -319,10 +321,10 @@ class App {
     this.#settings = settings;
 
     this.#ui = new Ui({
-      onToggleListen: () => void this.#toggleListen(),
       onSourceChange: (source) => void this.#setSource(source),
       onToggleMetronome: () => void this.#toggleMetronome(),
       onMuteChange: (muted) => this.#metronome.setMuted(muted),
+      onGesture: () => this.#onGesture(),
     });
 
     this.#timeline = new Timeline(this.#ui.canvas, {
@@ -359,7 +361,6 @@ class App {
     this.#timeline.start();
 
     this.#ui.setState("idle");
-    this.#ui.setListening(false);
     this.#ui.setMetronome({ running: false, message: null }, DEFAULT_BPM);
     this.#ui.setStatus(
       `Ready. ${WINDOW_BEATS} beats of history at ${DEFAULT_BPM} bpm ` +
@@ -371,7 +372,8 @@ class App {
     this.#build(settings.source);
 
     if (settings.metronome) void this.#metronome.start();
-    if (settings.autostart) void this.#toggleListen();
+    // The page listens because it is open. There is no transport to press.
+    void this.#start();
   }
 
   get probe(): DemoProbe {
@@ -423,8 +425,8 @@ class App {
     this.#ui.setState(instance.getState());
     this.#timeline.setHint(
       this.#effectiveSource === "mock"
-        ? "Press Start — the mock plays a 16-beat phrase."
-        : "Press Start and play something."
+        ? "Listening — the mock plays a 16-beat phrase."
+        : "Listening — play something."
     );
     this.#subscribe(instance);
   }
@@ -439,7 +441,6 @@ class App {
         this.#probe.state = state;
         this.#ui.setState(state);
         this.#listening = state === "listening";
-        this.#ui.setListening(this.#listening, this.#busy);
         // Source time restarts at 0 on every start, so the wall-clock offset
         // measured during the previous run is worse than having none.
         if (state === "starting") this.#resetClock();
@@ -580,34 +581,35 @@ class App {
 
   /* ---- transport ---- */
 
-  async #toggleListen(): Promise<void> {
+  /**
+   * Start listening. Called on load and after every source switch — there is no
+   * transport control, so this is the only path in.
+   *
+   * The one thing that can stand in the way is the autoplay policy: a page that
+   * has not been interacted with may not be allowed to resume an `AudioContext`,
+   * and a suspended context means a silent recognizer rather than an error. That
+   * is checked for up front rather than inferred from a failure afterwards, and
+   * when it bites the start is deferred to the next gesture instead of being
+   * abandoned.
+   */
+  async #start(): Promise<void> {
     const recognizer = this.#recognizer;
-    if (!recognizer || this.#busy) return;
+    if (!recognizer || this.#busy || this.#listening) return;
 
-    if (this.#listening || recognizer.getState() === "listening") {
-      this.#busy = true;
-      this.#ui.setListening(true, true);
-      try {
-        // Async in 0.2, and awaiting it is what guarantees every Note still
-        // sounding gets its `noteEnded` instead of being dropped mid-flight.
-        await recognizer.stop();
-      } catch (cause) {
-        this.#ui.setError(toRecognizerError(cause));
-      } finally {
-        this.#busy = false;
-        this.#listening = false;
-        this.#ui.setListening(false, false);
-        this.#publishActive(recognizer);
-      }
+    if (!(await this.#audioReady())) {
+      this.#deferToGesture();
       return;
     }
+    // Audio is available, so whatever was parked waiting for a gesture no
+    // longer is. This matters on the path in from `#setSource()`: changing the
+    // source IS a gesture, so the start that was waiting for one succeeds here
+    // and the prompt would otherwise stay on screen asking for a click that
+    // has already happened.
+    this.#clearGesture();
 
     this.#busy = true;
-    this.#ui.setListening(false, true);
     this.#ui.setError(null);
     try {
-      // A user gesture is on the stack here, so the metronome's AudioContext
-      // (and the library's) can legally start.
       await recognizer.start();
       this.#listening = recognizer.getState() === "listening";
     } catch (cause) {
@@ -618,19 +620,112 @@ class App {
       this.#listening = false;
     } finally {
       this.#busy = false;
-      this.#ui.setListening(this.#listening, false);
     }
   }
 
+  async #stop(): Promise<void> {
+    const recognizer = this.#recognizer;
+    if (!recognizer || this.#busy) return;
+    if (!this.#listening && recognizer.getState() !== "listening") return;
+
+    this.#busy = true;
+    try {
+      // Async in 0.2, and awaiting it is what guarantees every Note still
+      // sounding gets its `noteEnded` instead of being dropped mid-flight.
+      await recognizer.stop();
+    } catch (cause) {
+      this.#ui.setError(toRecognizerError(cause));
+    } finally {
+      this.#busy = false;
+      this.#listening = false;
+      this.#publishActive(recognizer);
+    }
+  }
+
+  /**
+   * True when the shared `AudioContext` is running, or when there is none to
+   * worry about (the library then makes its own and the same policy applies to
+   * it — but there is nothing this page can check or resume on its behalf).
+   *
+   * `resume()` is attempted first because it succeeds outright on a browser with
+   * no autoplay restriction, on one where the user has already interacted, and
+   * on a media-engagement-indexed origin. Only a context still suspended
+   * afterwards genuinely needs a gesture.
+   */
+  async #audioReady(): Promise<boolean> {
+    const context = this.#audioContext;
+    if (!context) return true;
+
+    // Read through a function so the two checks are two separate reads.
+    // `context.state` is a live value that `resume()` is expected to change,
+    // but to the compiler it is a plain property, so an inline `=== "running"`
+    // before the await narrows the type and makes the one after it dead code.
+    const running = (): boolean => context.state === "running";
+    if (running()) return true;
+    try {
+      await context.resume();
+    } catch {
+      /* Still suspended; the check below is what decides. */
+    }
+    return running();
+  }
+
+  /**
+   * Wait for the first click or keypress, then start.
+   *
+   * Listens on the whole document, not just the prompt: on a page where the
+   * user reaches for the source selector or the metronome first, that click is
+   * already a gesture and demanding a second one would be theatre. The prompt
+   * is shown so that a page which appears to be doing nothing can say why.
+   */
+  #deferToGesture(): void {
+    if (this.#gestureArmed) return;
+    this.#gestureArmed = true;
+    this.#ui.setGestureNeeded(true);
+    this.#ui.setStatus(
+      "Waiting for a click — this browser will not open audio until the page has been interacted with."
+    );
+
+    const once = { once: true, capture: true } as const;
+    const fire = (): void => this.#onGesture();
+    document.addEventListener("pointerdown", fire, once);
+    document.addEventListener("keydown", fire, once);
+    this.#disarmGesture = (): void => {
+      document.removeEventListener("pointerdown", fire, once);
+      document.removeEventListener("keydown", fire, once);
+    };
+  }
+
+  #onGesture(): void {
+    if (!this.#gestureArmed) return;
+    this.#clearGesture();
+    void this.#start();
+  }
+
+  /** Take down the prompt and the listeners behind it. Safe to call unarmed. */
+  #clearGesture(): void {
+    if (!this.#gestureArmed) return;
+    this.#gestureArmed = false;
+    this.#disarmGesture?.();
+    this.#disarmGesture = null;
+    this.#ui.setGestureNeeded(false);
+  }
+
   async #setSource(choice: SourceChoice): Promise<void> {
-    const wasListening = this.#listening;
     this.#settings.source = choice;
+    // Stop before discarding it: `stop()` is what flushes a `noteEnded` for
+    // everything still sounding, and disposing straight through the teardown
+    // would drop them mid-flight.
+    await this.#stop();
     this.#ui.setError(null);
     this.#timeline.clear();
     this.#ui.clearLog();
     this.#ui.setActiveNotes([], 0);
+    // `#build()` tears the old recognizer down, which stops it; the page is
+    // always listening, so the new one starts immediately rather than
+    // inheriting whether the old one happened to be running.
     this.#build(choice);
-    if (wasListening) await this.#toggleListen();
+    await this.#start();
   }
 
   async #toggleMetronome(): Promise<void> {

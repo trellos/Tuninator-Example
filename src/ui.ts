@@ -147,7 +147,6 @@ export class Ui {
   #metronomeBtn: HTMLButtonElement;
   #muteCheckbox: HTMLInputElement;
 
-  #sourceBadge: HTMLElement;
   #statePill: HTMLElement;
   #statusMessage: HTMLElement;
   #errorBanner: HTMLElement;
@@ -186,7 +185,6 @@ export class Ui {
     this.#metronomeBtn = must<HTMLButtonElement>("metronome-btn");
     this.#muteCheckbox = must<HTMLInputElement>("metronome-mute");
 
-    this.#sourceBadge = must("source-badge");
     this.#statePill = must("state-pill");
     this.#statusMessage = must("status-message");
     this.#errorBanner = must("error-banner");
@@ -242,10 +240,18 @@ export class Ui {
     this.#statusMessage.textContent = message;
   }
 
-  setSource(choice: SourceChoice, effective: "mock" | "live"): void {
+  /**
+   * Reflect the source back into the select.
+   *
+   * Only the *choice*, because only the choice is this page's to report. What
+   * the choice resolves to used to be shown separately, as a "live microphone"
+   * badge, which read as a statement about the capture hardware — and the page
+   * has no idea what the browser opened, or whether anything is plugged into
+   * it. The level and channel meters answer that from the signal itself, which
+   * is the only honest way to answer it.
+   */
+  setSource(choice: SourceChoice): void {
     this.#sourceSelect.value = choice;
-    this.#sourceBadge.textContent = effective === "mock" ? "mock input" : "live microphone";
-    this.#sourceBadge.dataset["kind"] = effective;
   }
 
   setMetronome(status: MetronomeStatus, bpm: number): void {

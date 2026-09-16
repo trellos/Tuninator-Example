@@ -421,7 +421,7 @@ class App {
 
     this.#recognizer = instance;
     this.#probe.source = this.#effectiveSource;
-    this.#ui.setSource(choice, this.#effectiveSource);
+    this.#ui.setSource(choice);
     this.#ui.setState(instance.getState());
     this.#timeline.setHint(
       this.#effectiveSource === "mock"

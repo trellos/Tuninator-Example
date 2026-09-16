@@ -57,7 +57,7 @@ cd ../Tuninator-Example && npm install
 
 | parameter | effect |
 | --- | --- |
-| *(none)* | **auto** — use the real library, falling back to the mock if it cannot be constructed |
+| *(none)* | **auto** — use the real library. There is no fallback to the mock: `createRecognizer` only allocates, so there is no construction failure to fall back *from*, and everything that can actually go wrong surfaces from `start()` into the error banner |
 | `?mock=1` | force the synthetic source (no microphone, no permission prompt) |
 | `?mock=0` | force the real library |
 | `?workletUrl=/nope.js` | point the library at a missing worklet, to exercise `worklet-load-failed` |

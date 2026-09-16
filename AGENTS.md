@@ -179,8 +179,8 @@ tree, never by picking a side.
 ### Two traps the suite has already caught
 
 **`text-transform: uppercase` changes what `innerText` returns.** Playwright reads rendered text, so
-uppercasing an element the suite asserts on breaks an exact-match check. `#state-pill`,
-`#source-badge` and `#error-code` therefore use `font-variant-caps: all-small-caps`, which renders as
+uppercasing an element the suite asserts on breaks an exact-match check. `#state-pill` and
+`#error-code` therefore use `font-variant-caps: all-small-caps`, which renders as
 caps without touching the text node. `#error-title` is also read by the suite, and is left in
 sentence case at a larger size instead — synthesised small-caps in a pixel display face turns to mush
 under the scanline overlay, and that is the one string that has to stay readable. `textContent`
@@ -273,25 +273,28 @@ second one that guesses.
 **Notes overlap.** Everything is keyed by `note.id`. The mock's C chord rings through the note after
 it specifically so this is exercised rather than assumed.
 
-### One library gap the demo now works around
+### A library gap that has since closed
 
-`PitchFrame.channelRms` and `.selectedChannel` are **not populated on the live path**. The capture
-worklet measures both and posts them on every `CaptureChunk`; `BrowserRecognizer` forwards only
-`samples` and `startSample` to the engine, so they never reach a `PitchFrame`. Both fields are
-optional, so this is a gap rather than a broken contract.
+`PitchFrame.channelRms` and `.selectedChannel` used to be **dropped on the live path**: the capture
+worklet measured both and posted them on every `CaptureChunk`, and `BrowserRecognizer` forwarded
+only `samples` and `startSample` to the engine, so they never reached a `PitchFrame`. The library
+forwards both now — a live `smoke:live` run reports `channelRms=[0, 0.138] selectedChannel=1`
+against the `shim=silent-ch0` rig — so the live path draws real per-channel meters.
 
-Consequences to keep in mind:
+What survives from that era, and why:
 
-- The per-channel meters say *"not reported by this source"* on the live path. That copy is
-  load-bearing — it is the difference between "the library did not tell us" and "there is no
-  signal", and the smoke suite asserts it.
-- `scripts/smoke.mjs` reports the gap with `note()`, not `check()`. **Do not turn those back into
-  assertions against the current library** — they would fail. Equally, do not delete the surrounding
-  checks: the comb-filter pair (`channels=sum` reads an octave high, `auto` reads E3) is now the
-  *only* evidence that selection is happening at all, because `selectedChannel` no longer says so.
-- The channel-meter rendering is asserted on the **mock** run instead, which still supplies the
-  fields.
+- The empty state in `Ui.#renderChannels()` (*"not reported by this source"*) stays. Both fields are
+  still **optional** in `PitchFrame`, so a source that omits them is a contract-abiding source, and
+  the copy is the difference between "the library did not tell us" and "there is no signal".
+- The comb-filter pair (`channels=sum` reads an octave high, `auto` reads E3) stays. It became the
+  only evidence that selection happens at all while `selectedChannel` was missing; it is still the
+  only evidence that selection is *correct*, which no amount of reported metadata proves.
+- `scripts/smoke.mjs` reports the delivered values with `note()`, not `check()`. Keep it that way
+  unless you are asserting something the demo controls — the numbers are the library's, and this
+  repo cannot fix them.
 
-There is deliberately no dormant `else` branch waiting for the library to start forwarding them.
-If it does, the mock-path check already covers rendering, and the live-path assertions belong in the
-same commit that proves the fields arrive.
+The check that asserted the **absence** of these fields is gone. It failed the moment the gap
+closed, and its own `note()` line printed the values it claimed were unreported. Do not re-add it,
+here or anywhere: an assertion that a gap still exists can only ever fire as a false alarm when the
+gap closes. Assert what the demo should do with the data it gets, not what the library has yet to
+send.

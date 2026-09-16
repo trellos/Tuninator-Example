@@ -227,26 +227,19 @@ async function runStereoChannelCheck(page) {
     `frames=${probe?.frames}`
   );
 
-  // `PitchFrame.channelRms` / `.selectedChannel` are optional, and 0.2's browser
-  // adapter populates neither: the capture worklet measures them and
-  // `BrowserRecognizer` drops them on the way to the engine. So which channel
-  // was selected cannot be asserted from here -- the check above, that the tone
-  // is detected at all, is what still proves selection happened.
+  // There used to be a check here asserting the demo said "not reported by
+  // this source", back when the browser adapter dropped `channelRms` and
+  // `selectedChannel` on the way to the engine. The library forwards both now,
+  // so the empty state it asserted is unreachable and the check only ever
+  // reported that the library had improved. The mock-path check covers
+  // rendering the meters; `readChannelPanel` is what it reads them with.
   //
-  // Reported rather than checked, because a demo cannot fix a library. The
-  // demo's job is to say so rather than draw an empty meter, and that IS
-  // checked. If a later revision starts forwarding the fields, the mock-path
-  // check already covers rendering them.
-  const channels = await readChannelPanel(page);
+  // Do not re-add it. An assertion that a gap still exists fails the moment the
+  // gap closes, which is the one outcome nobody needs to be told about twice.
   note(
-    "stereo: per-channel diagnostics are not reported by this library revision",
+    "stereo: per-channel diagnostics as delivered by this library revision",
     `channelRms=${JSON.stringify(probe?.channelRms)} ` +
       `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`
-  );
-  check(
-    "stereo: the demo says the channels are unreported rather than drawing an empty meter",
-    channels.count === 0 && channels.note.includes("not reported"),
-    `${channels.count} rows, note="${channels.note}"`
   );
 }
 
@@ -294,13 +287,15 @@ async function runCombFilterCheck(page) {
     `${selected.note} @ ${selected.hz}Hz`
   );
 
-  // The pair above is the whole claim, and it is now carried entirely by the
-  // pitch readout: `selectedChannel` would have said which channel won, but 0.2
-  // does not deliver it (see runStereoChannelCheck). The two results differing
-  // is what proves `auto` is not summing.
+  // The pair above is the whole claim, and it is carried by the pitch readout
+  // rather than by `selectedChannel`. The library does name the channel it
+  // settled on now, but naming one is not evidence it picked the right one --
+  // only the two results differing proves `auto` is not summing. Reported for
+  // the record; deliberately not asserted, since which channel wins here is the
+  // library's call and either would be defensible.
   const probe = await page.evaluate(() => window.__tuninatorDemo ?? null);
   note(
-    "comb: the library did not name the channel it settled on",
+    "comb: the channel the library settled on",
     `selectedChannel=${JSON.stringify(probe?.selectedChannel)}`
   );
 }
@@ -361,9 +356,16 @@ async function main() {
     await page.waitForSelector("#timeline-canvas");
 
     check("page has a canvas", (await page.locator("#timeline-canvas").count()) === 1);
+    // The source badge is gone: it claimed "live microphone" when all it knew
+    // was which recognizer this page built. Its replacement asserts that from
+    // the probe rather than from any copy on screen -- `#source-select` only
+    // says what was *asked* for, and the whole complaint about the badge was
+    // that a label is not evidence.
+    const sourceProbe = await page.evaluate(() => window.__tuninatorDemo?.source ?? null);
     check(
-      "source badge reports the mock",
-      (await page.locator("#source-badge").innerText()).includes("mock")
+      "the mock recognizer is the one actually running",
+      sourceProbe === "mock",
+      `source=${sourceProbe}`
     );
 
     await page.waitForFunction(
